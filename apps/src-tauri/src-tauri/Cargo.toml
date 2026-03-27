@@ -1,0 +1,31 @@
+[package]
+name = "dudereader"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+oauth2 = { version = "4.4", default-features = false, features = ["reqwest", "rustls-tls"] }
+quick-xml = "0.31"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+urlencoding = "2.1"
+zip = "0.6"
+dirs = "4"
+
+[dependencies.tauri]
+version = "2.10.3"
+features = ["wry"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
