@@ -10,6 +10,7 @@ pub struct AppState {
 }
 
 fn main() {
+  dotenvy::dotenv().ok();
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .manage(AppState {
@@ -20,9 +21,14 @@ fn main() {
       commands::import_books,
       commands::list_books,
       commands::refresh_metadata,
+      commands::fetch_cover,
+      commands::cover_data,
+      commands::read_book_bytes,
       commands::update_progress,
+      commands::reading_stats,
       commands::drive_auth_start,
       commands::drive_auth_wait,
+      commands::drive_status,
       commands::drive_sync
     ])
     .run(tauri::generate_context!())

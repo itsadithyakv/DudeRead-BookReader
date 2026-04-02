@@ -1,8 +1,10 @@
 use crate::db::{self, BookRecord};
-use crate::metadata::open_library;
+use crate::metadata::{open_library, wikipedia};
 use crate::storage;
 use crate::sync::drive;
 use crate::AppState;
+use base64::Engine;
+use serde::Serialize;
 use tauri::State;
 
 #[tauri::command]
@@ -39,6 +41,14 @@ pub async fn import_books(paths: Vec<String>, state: State<'_, AppState>) -> Res
       author = meta.author;
       genres = meta.subjects;
       if let Some(url) = meta.cover_url {
+        if let Ok(path) = storage::store_cover(&url, &hash).await {
+          cover_url = Some(path.to_string_lossy().to_string());
+        }
+      }
+    }
+
+    if cover_url.is_none() {
+      if let Ok(Some(url)) = wikipedia::fetch_cover(&title, author.as_deref()).await {
         if let Ok(path) = storage::store_cover(&url, &hash).await {
           cover_url = Some(path.to_string_lossy().to_string());
         }
@@ -95,6 +105,14 @@ pub async fn refresh_metadata(book_id: String, state: State<'_, AppState>) -> Re
     }
   }
 
+  if book.cover_url.is_none() {
+    if let Ok(Some(url)) = wikipedia::fetch_cover(&book.title, book.author.as_deref()).await {
+      if let Ok(path) = storage::store_cover(&url, &book.file_hash).await {
+        book.cover_url = Some(path.to_string_lossy().to_string());
+      }
+    }
+  }
+
   {
     let db = state.db.lock().unwrap();
     db.update_metadata(&book).map_err(|e| e.to_string())?;
@@ -104,10 +122,105 @@ pub async fn refresh_metadata(book_id: String, state: State<'_, AppState>) -> Re
 }
 
 #[tauri::command]
+pub async fn fetch_cover(book_id: String, state: State<'_, AppState>) -> Result<Option<BookRecord>, String> {
+  let mut book = {
+    let db = state.db.lock().unwrap();
+    db.find_by_id(&book_id)
+      .map_err(|e| e.to_string())?
+      .ok_or_else(|| "Book not found".to_string())?
+  };
+
+  if book.cover_url.is_some() {
+    return Ok(Some(book));
+  }
+
+  if let Ok(Some(meta)) = open_library::fetch_metadata(&book.title, book.author.as_deref()).await {
+    if let Some(url) = meta.cover_url {
+      if let Ok(path) = storage::store_cover(&url, &book.file_hash).await {
+        book.cover_url = Some(path.to_string_lossy().to_string());
+        let db = state.db.lock().unwrap();
+        db.update_cover(&book.id, book.cover_url.clone())
+          .map_err(|e| e.to_string())?;
+        return Ok(Some(book));
+      }
+    }
+  }
+
+  if let Ok(Some(url)) = wikipedia::fetch_cover(&book.title, book.author.as_deref()).await {
+    if let Ok(path) = storage::store_cover(&url, &book.file_hash).await {
+      book.cover_url = Some(path.to_string_lossy().to_string());
+      let db = state.db.lock().unwrap();
+      db.update_cover(&book.id, book.cover_url.clone())
+        .map_err(|e| e.to_string())?;
+      return Ok(Some(book));
+    }
+  }
+
+  Ok(None)
+}
+
+#[tauri::command]
+pub fn cover_data(book_id: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
+  let book = {
+    let db = state.db.lock().unwrap();
+    db.find_by_id(&book_id)
+      .map_err(|e| e.to_string())?
+      .ok_or_else(|| "Book not found".to_string())?
+  };
+
+  let cover_url = match book.cover_url {
+    Some(value) => value,
+    None => return Ok(None)
+  };
+
+  let bytes = std::fs::read(&cover_url).map_err(|e| e.to_string())?;
+  let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+  Ok(Some(format!("data:image/jpeg;base64,{}", encoded)))
+}
+
+#[tauri::command]
+pub fn read_book_bytes(book_id: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
+  let book = {
+    let db = state.db.lock().unwrap();
+    db.find_by_id(&book_id)
+      .map_err(|e| e.to_string())?
+      .ok_or_else(|| "Book not found".to_string())?
+  };
+
+  let bytes = std::fs::read(&book.local_path).map_err(|e| e.to_string())?;
+  let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+  Ok(Some(encoded))
+}
+
+#[tauri::command]
 pub fn update_progress(book_id: String, progress: f32, last_opened: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
   let db = state.db.lock().unwrap();
   db.update_progress(&book_id, progress, last_opened)
     .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveStatus {
+  pub connected: bool,
+  pub expires_at: Option<String>
+}
+
+#[tauri::command]
+pub fn drive_status(state: State<'_, AppState>) -> Result<DriveStatus, String> {
+  let db = state.db.lock().unwrap();
+  let refresh = db.get_setting("drive_refresh_token").map_err(|e| e.to_string())?;
+  let expires_at = db.get_setting("drive_expires_at").map_err(|e| e.to_string())?;
+  Ok(DriveStatus {
+    connected: refresh.is_some(),
+    expires_at
+  })
+}
+
+#[tauri::command]
+pub fn reading_stats(state: State<'_, AppState>) -> Result<db::ReadingStats, String> {
+  let db = state.db.lock().unwrap();
+  db.reading_stats().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

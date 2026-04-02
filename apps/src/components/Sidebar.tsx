@@ -1,43 +1,61 @@
 import Logo from "../assets/DudeReadlogoNobg.png";
 
 const navItems = [
-  { label: "Library", active: true },
-  { label: "Collections", active: false },
-  { label: "Favorites", active: false }
+  { label: "Library", icon: "auto_stories" },
+  { label: "Collections", icon: "collections_bookmark" },
+  { label: "Streak", icon: "local_fire_department" },
+  { label: "Settings", icon: "settings" }
 ];
 
-export const Sidebar = () => {
+type SidebarProps = {
+  activeItem: string;
+  onNavigate: (label: string) => void;
+  onStartReading: () => void;
+  startDisabled?: boolean;
+};
+
+export const Sidebar = ({ activeItem, onNavigate, onStartReading, startDisabled }: SidebarProps) => {
   return (
-    <aside className="flex h-full w-64 flex-col gap-6 rounded-3xl border border-white/5 bg-graphite-850/80 p-6 shadow-glow">
-      <div className="flex items-center gap-3">
-        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white/5">
-          <img src={Logo} alt="DudeReader logo" className="h-9 w-9" />
-        </div>
-        <div>
-          <p className="text-lg font-semibold">DudeReader</p>
-          <p className="text-xs text-white/60">Library control center</p>
+    <aside className="hidden h-full w-64 flex-col border-r border-primary/10 bg-surface-container-low px-4 py-8 shadow-[10px_0_40px_rgba(0,0,0,0.5)] md:flex">
+      <div className="px-2 pb-8">
+        <div className="flex items-center gap-3">
+          <img src={Logo} alt="DudeReads logo" className="h-10 w-10" />
+          <div>
+            <p className="text-lg font-headline font-semibold text-on-surface">The Curator</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-on-surface-variant/70">
+              Moonlit Reader
+            </p>
+          </div>
         </div>
       </div>
 
-      <nav className="flex flex-col gap-2">
+      <nav className="flex-1 space-y-2 px-2 text-sm">
         {navItems.map((item) => (
           <button
             key={item.label}
-            className={`flex items-center justify-between rounded-2xl px-4 py-3 text-left text-sm transition ${
-              item.active
-                ? "bg-white/10 text-white shadow-accent"
-                : "text-white/60 hover:bg-white/5"
+            className={`flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition ${
+              item.label === activeItem
+                ? "bg-surface-container-high text-primary"
+                : "text-on-surface-variant hover:bg-surface-container-high hover:text-primary"
             }`}
             type="button"
+            onClick={() => onNavigate(item.label)}
           >
-            <span>{item.label}</span>
-            {item.active && <span className="h-2 w-2 rounded-full bg-white"></span>}
+            <span className="material-symbols-outlined">{item.icon}</span>
+            <span className={item.label === activeItem ? "font-semibold" : ""}>{item.label}</span>
           </button>
         ))}
       </nav>
 
-      <div className="mt-auto rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 to-transparent p-4 text-xs text-white/70">
-        Sync keeps your library mirrored on Google Drive. Connect once and keep reading everywhere.
+      <div className="mt-auto px-2">
+        <button
+          className="w-full rounded-full bg-primary py-4 text-sm font-bold text-on-primary shadow-lg shadow-primary/10 transition hover:scale-[1.02] active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+          type="button"
+          onClick={onStartReading}
+          disabled={startDisabled}
+        >
+          Start Reading
+        </button>
       </div>
     </aside>
   );

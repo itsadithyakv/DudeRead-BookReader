@@ -97,7 +97,7 @@ export const LibraryToolbar = ({
           ))}
         </div>
         <button
-          className="rounded-2xl bg-gradient-to-r from-pink-400 via-purple-400 to-sky-400 px-4 py-2 text-sm font-semibold text-graphite-900"
+          className="rounded-2xl bg-primary px-4 py-2 text-sm font-semibold text-on-primary"
           type="button"
           onClick={onImport}
         >

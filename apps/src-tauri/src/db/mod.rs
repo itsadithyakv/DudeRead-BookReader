@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,6 +18,15 @@ pub struct BookRecord {
   pub progress: f32,
   pub last_opened: Option<String>,
   pub created_at: String
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingStats {
+  pub streak_days: i64,
+  pub total_days: i64,
+  pub last_read_at: Option<String>,
+  pub days_last_7: i64
 }
 
 pub struct Database {
@@ -67,7 +76,15 @@ impl Database {
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
-      );"
+      );
+      CREATE TABLE IF NOT EXISTS reading_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        opened_at TEXT NOT NULL,
+        date_key TEXT NOT NULL,
+        UNIQUE(book_id, date_key)
+      );
+      CREATE INDEX IF NOT EXISTS reading_sessions_date_idx ON reading_sessions (date_key);"
     )?;
     Ok(())
   }
@@ -194,11 +211,22 @@ impl Database {
     Ok(())
   }
 
+  pub fn update_cover(&self, book_id: &str, cover_url: Option<String>) -> Result<()> {
+    self.conn.execute(
+      "UPDATE books SET cover_url = ?1 WHERE id = ?2",
+      params![cover_url, book_id]
+    )?;
+    Ok(())
+  }
+
   pub fn update_progress(&self, book_id: &str, progress: f32, last_opened: Option<String>) -> Result<()> {
     self.conn.execute(
       "UPDATE books SET progress = ?1, last_opened = ?2 WHERE id = ?3",
       params![progress, last_opened, book_id]
     )?;
+    if let Some(opened_at) = last_opened {
+      self.log_reading_session(book_id, &opened_at)?;
+    }
     Ok(())
   }
 
@@ -218,6 +246,64 @@ impl Database {
       return Ok(Some(row.get(0)?));
     }
     Ok(None)
+  }
+
+  pub fn log_reading_session(&self, book_id: &str, opened_at: &str) -> Result<()> {
+    let date_key = DateTime::parse_from_rfc3339(opened_at)
+      .map(|dt| dt.date_naive().to_string())
+      .unwrap_or_else(|_| Utc::now().date_naive().to_string());
+    self.conn.execute(
+      "INSERT INTO reading_sessions (book_id, opened_at, date_key)
+       VALUES (?1, ?2, ?3)
+       ON CONFLICT(book_id, date_key) DO UPDATE SET opened_at = excluded.opened_at",
+      params![book_id, opened_at, date_key]
+    )?;
+    Ok(())
+  }
+
+  pub fn reading_stats(&self) -> Result<ReadingStats> {
+    let mut stmt = self.conn.prepare(
+      "SELECT date_key FROM reading_sessions GROUP BY date_key ORDER BY date_key DESC"
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut dates: Vec<NaiveDate> = Vec::new();
+    for row in rows {
+      if let Ok(date) = NaiveDate::parse_from_str(&row?, "%Y-%m-%d") {
+        dates.push(date);
+      }
+    }
+
+    let today = Utc::now().date_naive();
+    let mut streak_days = 0;
+    if let Some(first) = dates.first() {
+      if *first == today {
+        streak_days = 1;
+        let mut expected = today.pred_opt().unwrap_or(today);
+        for date in dates.iter().skip(1) {
+          if *date == expected {
+            streak_days += 1;
+            expected = expected.pred_opt().unwrap_or(*date);
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    let cutoff = today - chrono::Duration::days(6);
+    let days_last_7 = dates.iter().filter(|date| **date >= cutoff).count() as i64;
+
+    let last_read_at: Option<String> = self
+      .conn
+      .query_row("SELECT MAX(opened_at) FROM reading_sessions", [], |row| row.get(0))
+      .unwrap_or(None);
+
+    Ok(ReadingStats {
+      streak_days,
+      total_days: dates.len() as i64,
+      last_read_at,
+      days_last_7
+    })
   }
 }
 
