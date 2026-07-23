@@ -11,10 +11,6 @@ type AppearanceState = {
 };
 
 const STORAGE_KEY = "leaflet.appearance.v1";
-const DARK_QUERY = "(prefers-color-scheme: dark)";
-
-const systemTheme = (): ThemeMode =>
-  typeof window !== "undefined" && window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
 
 const readPreference = (): ThemeMode | null => {
   try {
@@ -37,7 +33,7 @@ const applyTheme = (theme: ThemeMode) => {
 };
 
 const savedTheme = readPreference();
-const initialTheme = savedTheme ?? systemTheme();
+const initialTheme = savedTheme ?? "dark";
 applyTheme(initialTheme);
 
 export const useAppearanceStore = create<AppearanceState>((set, get) => ({
@@ -53,21 +49,12 @@ export const useAppearanceStore = create<AppearanceState>((set, get) => ({
   },
   resetTheme() {
     localStorage.removeItem(STORAGE_KEY);
-    const theme = systemTheme();
+    const theme: ThemeMode = "dark";
     applyTheme(theme);
     set({ theme, hasUserPreference: false });
   }
 }));
 
 export const watchSystemTheme = () => {
-  if (typeof window === "undefined") return () => undefined;
-  const media = window.matchMedia(DARK_QUERY);
-  const onChange = (event: MediaQueryListEvent) => {
-    if (useAppearanceStore.getState().hasUserPreference) return;
-    const theme: ThemeMode = event.matches ? "dark" : "light";
-    applyTheme(theme);
-    useAppearanceStore.setState({ theme });
-  };
-  media.addEventListener("change", onChange);
-  return () => media.removeEventListener("change", onChange);
+  return () => undefined;
 };

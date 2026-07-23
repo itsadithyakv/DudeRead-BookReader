@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#eee5d3" />
+    <meta name="theme-color" content="#141311" />
     <title>Leaflet</title>
     <script>
       (() => {
@@ -11,11 +11,12 @@
           const saved = JSON.parse(localStorage.getItem("leaflet.appearance.v1") || "null");
           const theme = saved?.theme === "light" || saved?.theme === "dark"
             ? saved.theme
-            : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            : "dark";
           document.documentElement.dataset.theme = theme;
           document.documentElement.style.colorScheme = theme;
         } catch {
-          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.theme = "dark";
+          document.documentElement.style.colorScheme = "dark";
         }
       })();
     </script>

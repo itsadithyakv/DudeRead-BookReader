@@ -6,16 +6,18 @@ import { bookService } from "../services/bookService";
 import { useLibraryStore } from "../store/libraryStore";
 import { getSessionProgress, useHabitStore } from "../store/habitStore";
 import { converterService } from "../services/converterService";
-import { useAppearanceStore } from "../store/appearanceStore";
+import { useAppearanceStore, type ThemeMode } from "../store/appearanceStore";
 import { useAccountStore } from "../store/accountStore";
 import {
   estimateWordDifficulty,
   estimateRsvpPauseMultiplier,
   getAdaptiveWpm,
   getReadingTimeBand,
+  loadSmartReadCalibration,
   loadSmartReadProfile,
   recordSmartReadSample,
   saveSmartReadProfile,
+  type SmartReadCalibration,
   type SmartReadProfile
 } from "../services/smartReadService";
 import paperLightTexture from "../assets/paper-light.webp";
@@ -39,8 +41,67 @@ type TocItem = {
   subitems?: TocItem[];
 };
 
-type ReaderDisplayMode = "paper" | "app";
+type ReaderDisplayMode = "paper" | "dark-paper" | "true-white" | "true-black" | "app";
 type ReadingMode = "standard" | "smart" | "speed";
+
+const getReaderFinish = (displayMode: ReaderDisplayMode, theme: ThemeMode) => {
+  if (displayMode === "paper") {
+    return {
+      themeName: "leaflet-light",
+      background: "#f0eadc",
+      text: "#30291f",
+      texture: paperLightTexture,
+      textureOpacity: "e0"
+    };
+  }
+  if (displayMode === "dark-paper") {
+    return {
+      themeName: "leaflet-dark",
+      background: "#191b1a",
+      text: "#eeeae0",
+      texture: paperDarkTexture,
+      textureOpacity: "d4"
+    };
+  }
+  if (displayMode === "true-white") {
+    return {
+      themeName: "leaflet-light",
+      background: "#f8f8f4",
+      text: "#090a09",
+      texture: null,
+      textureOpacity: "ff"
+    };
+  }
+  if (displayMode === "true-black") {
+    return {
+      themeName: "leaflet-dark",
+      background: "#000000",
+      text: "#f2f1eb",
+      texture: null,
+      textureOpacity: "ff"
+    };
+  }
+  return theme === "light"
+    ? {
+        themeName: "leaflet-light",
+        background: "#edeae2",
+        text: "#16191e",
+        texture: paperLightTexture,
+        textureOpacity: "e8"
+      }
+    : {
+        themeName: "leaflet-dark",
+        background: "#202227",
+        text: "#f7f9fc",
+        texture: paperDarkTexture,
+        textureOpacity: "e8"
+      };
+};
+
+const getReaderFinishBackground = (finish: ReturnType<typeof getReaderFinish>) =>
+  finish.texture
+    ? `linear-gradient(${finish.background}${finish.textureOpacity}, ${finish.background}${finish.textureOpacity}), url("${finish.texture}")`
+    : "none";
 
 type ReaderWord = {
   text: string;
@@ -148,7 +209,11 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const autoScrollCarryRef = useRef(0);
   const readerDotTimerRef = useRef<number | null>(null);
   const wordIndexTimerRef = useRef<number | null>(null);
+  const sidebarOpenTimerRef = useRef<number | null>(null);
   const sidebarCloseTimerRef = useRef<number | null>(null);
+  const manualScrollTimerRef = useRef<number | null>(null);
+  const readerDotDragFrameRef = useRef<number | null>(null);
+  const readerDotOffscreenTimerRef = useRef<number | null>(null);
   const readerDotRetryRef = useRef<{ cfi: string; count: number }>({ cfi: "", count: 0 });
   const readerDotElementRef = useRef<HTMLElement | null>(null);
   const readerDotEnabledRef = useRef(true);
@@ -158,7 +223,14 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const speedReadWpmRef = useRef(260);
   const readerWordsRef = useRef<ReaderWord[]>([]);
   const activeWordIndexRef = useRef(0);
+  const readerDotAnchorIndexRef = useRef<number | null>(null);
+  const readerDotUserAnchorUntilRef = useRef(0);
+  const requestedStartIndexRef = useRef<number | null>(null);
   const programmaticScrollUntilRef = useRef(0);
+  const smartManualOverrideUntilRef = useRef(0);
+  const smartPaceBiasRef = useRef(1);
+  const smartAheadTimerRef = useRef<number | null>(null);
+  const smartAheadTargetIndexRef = useRef<number | null>(null);
   const smartSessionRef = useRef<SmartSession | null>(null);
   const manualReadingRef = useRef<{ index: number; at: number } | null>(null);
   const activeSession = useHabitStore((state) => state.activeSession);
@@ -365,8 +437,23 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       if (wordIndexTimerRef.current) {
         window.clearTimeout(wordIndexTimerRef.current);
       }
+      if (sidebarOpenTimerRef.current) {
+        window.clearTimeout(sidebarOpenTimerRef.current);
+      }
       if (sidebarCloseTimerRef.current) {
         window.clearTimeout(sidebarCloseTimerRef.current);
+      }
+      if (manualScrollTimerRef.current) {
+        window.clearTimeout(manualScrollTimerRef.current);
+      }
+      if (readerDotDragFrameRef.current) {
+        window.cancelAnimationFrame(readerDotDragFrameRef.current);
+      }
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+      }
+      if (smartAheadTimerRef.current) {
+        window.clearTimeout(smartAheadTimerRef.current);
       }
       if (checkpointTimerRef.current) {
         window.clearTimeout(checkpointTimerRef.current);
@@ -416,6 +503,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     initialPrefs?.displayMode ?? "paper"
   );
   const [readingMode, setReadingMode] = useState<ReadingMode>("standard");
+  const [pendingReadingMode, setPendingReadingMode] = useState<Exclude<ReadingMode, "standard"> | null>(
+    null
+  );
   const [readingPaused, setReadingPaused] = useState(false);
   const [speedReadWpm, setSpeedReadWpm] = useState(
     Math.min(1000, Math.max(120, initialPrefs?.speedReadWpm ?? 260))
@@ -428,6 +518,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const toggleTheme = useAppearanceStore((state) => state.toggleTheme);
   const accountEmail = useAccountStore((state) => state.email);
   const smartProfileRef = useRef<SmartReadProfile>(loadSmartReadProfile(accountEmail));
+  const smartCalibrationRef = useRef<SmartReadCalibration>(
+    loadSmartReadCalibration(accountEmail)
+  );
   const [morePanelOpen, setMorePanelOpen] = useState(false);
   const morePanelRef = useRef<HTMLDivElement | null>(null);
   const morePanelCloseRef = useRef<number | null>(null);
@@ -489,13 +582,28 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     setFontPanelOpen(false);
     setAutoScrollActive(false);
     setReadingMode("standard");
+    setPendingReadingMode(null);
     setReadingPaused(false);
     setReadingWord(null);
+    readerDotAnchorIndexRef.current = null;
+    readerDotUserAnchorUntilRef.current = 0;
+    if (readerDotOffscreenTimerRef.current) {
+      window.clearTimeout(readerDotOffscreenTimerRef.current);
+      readerDotOffscreenTimerRef.current = null;
+    }
+    requestedStartIndexRef.current = null;
+    smartPaceBiasRef.current = 1;
+    smartAheadTargetIndexRef.current = null;
+    if (smartAheadTimerRef.current) {
+      window.clearTimeout(smartAheadTimerRef.current);
+      smartAheadTimerRef.current = null;
+    }
     setMorePanelOpen(false);
   }, [book.id]);
 
   useEffect(() => {
     smartProfileRef.current = loadSmartReadProfile(accountEmail);
+    smartCalibrationRef.current = loadSmartReadCalibration(accountEmail);
   }, [accountEmail]);
 
   useEffect(() => {
@@ -535,15 +643,11 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     rendition.themes.override("box-sizing", "border-box");
   };
 
-  const handleToggleSidebar = () => {
-    if (sidebarOpen) {
-      setSidebarOpen(false);
-      return;
-    }
-    openReaderSidebar();
-  };
-
   const openReaderSidebar = () => {
+    if (sidebarOpenTimerRef.current) {
+      window.clearTimeout(sidebarOpenTimerRef.current);
+      sidebarOpenTimerRef.current = null;
+    }
     if (sidebarCloseTimerRef.current) {
       window.clearTimeout(sidebarCloseTimerRef.current);
       sidebarCloseTimerRef.current = null;
@@ -551,7 +655,26 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     setSidebarOpen(true);
   };
 
+  const scheduleReaderSidebarOpen = () => {
+    if (sidebarOpen || sidebarOpenTimerRef.current) {
+      return;
+    }
+    sidebarOpenTimerRef.current = window.setTimeout(() => {
+      sidebarOpenTimerRef.current = null;
+      openReaderSidebar();
+    }, 240);
+  };
+
+  const cancelReaderSidebarOpen = () => {
+    if (!sidebarOpenTimerRef.current) {
+      return;
+    }
+    window.clearTimeout(sidebarOpenTimerRef.current);
+    sidebarOpenTimerRef.current = null;
+  };
+
   const scheduleReaderSidebarClose = () => {
+    cancelReaderSidebarOpen();
     if (sidebarCloseTimerRef.current) {
       window.clearTimeout(sidebarCloseTimerRef.current);
     }
@@ -683,6 +806,106 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     };
   };
 
+  const applyUserReadingAnchor = (index: number) => {
+    const words = readerWordsRef.current;
+    if (words.length === 0) return;
+    if (readerDotOffscreenTimerRef.current) {
+      window.clearTimeout(readerDotOffscreenTimerRef.current);
+      readerDotOffscreenTimerRef.current = null;
+    }
+    const clampedIndex = Math.min(words.length - 1, Math.max(0, index));
+    const previousIndex = activeWordIndexRef.current;
+    const delta = clampedIndex - previousIndex;
+    readerDotAnchorIndexRef.current = clampedIndex;
+    readerDotUserAnchorUntilRef.current = Number.POSITIVE_INFINITY;
+    activeWordIndexRef.current = clampedIndex;
+    programmaticScrollUntilRef.current = 0;
+    smartManualOverrideUntilRef.current = Date.now() + 2200;
+    if (readingModeRef.current === "smart" && Math.abs(delta) >= 8) {
+      const adjustment = Math.min(0.08, Math.max(0.012, Math.abs(delta) / 1400));
+      smartPaceBiasRef.current = Math.min(
+        1.3,
+        Math.max(0.72, smartPaceBiasRef.current + (delta > 0 ? adjustment : -adjustment))
+      );
+      if (delta < 0 && smartSessionRef.current) {
+        smartSessionRef.current.rereads += Math.max(1, Math.round(Math.abs(delta) / 80));
+      }
+    }
+    if (readingModeRef.current !== "standard") {
+      setReadingWord(buildReadingWordState(clampedIndex));
+    }
+    positionReaderDotAtWord(clampedIndex);
+  };
+
+  const makeReaderDotInteractive = (element: HTMLElement, container: HTMLElement) => {
+    if (!element.querySelector(".reader-dot-sparks")) {
+      const sparks = element.ownerDocument.createElement("span");
+      sparks.className = "reader-dot-sparks";
+      sparks.setAttribute("aria-hidden", "true");
+      for (let index = 1; index <= 5; index += 1) {
+        const spark = element.ownerDocument.createElement("span");
+        spark.className = `reader-dot-spark reader-dot-spark-${index}`;
+        sparks.appendChild(spark);
+      }
+      element.appendChild(sparks);
+    }
+    if (element.dataset.interactive === "true") return;
+    element.dataset.interactive = "true";
+    element.tabIndex = 0;
+    element.setAttribute("role", "slider");
+    element.setAttribute("aria-label", "Dotty reading position");
+    element.setAttribute("aria-orientation", "vertical");
+    element.setAttribute("aria-valuemin", "1");
+    element.title = "Drag Dotty to choose your reading start line";
+    element.style.pointerEvents = "auto";
+
+    let dragging = false;
+    let pendingClientY = 0;
+    const moveToClientY = (clientY: number) => {
+      const rect = container.getBoundingClientRect();
+      const ratio = Math.min(0.98, Math.max(0.02, (clientY - rect.top) / Math.max(1, rect.height)));
+      applyUserReadingAnchor(findNearestWordIndex(ratio));
+    };
+    element.onpointerdown = (event) => {
+      dragging = true;
+      pendingClientY = event.clientY;
+      element.classList.add("reader-dot-dragging");
+      element.dataset.dragging = "true";
+      element.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+    element.onpointermove = (event) => {
+      if (!dragging) return;
+      pendingClientY = event.clientY;
+      if (readerDotDragFrameRef.current) return;
+      readerDotDragFrameRef.current = window.requestAnimationFrame(() => {
+        readerDotDragFrameRef.current = null;
+        moveToClientY(pendingClientY);
+      });
+    };
+    element.onpointerup = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      element.classList.remove("reader-dot-dragging");
+      delete element.dataset.dragging;
+      if (element.hasPointerCapture(event.pointerId)) {
+        element.releasePointerCapture(event.pointerId);
+      }
+      moveToClientY(event.clientY);
+    };
+    element.onpointercancel = () => {
+      dragging = false;
+      element.classList.remove("reader-dot-dragging");
+      delete element.dataset.dragging;
+    };
+    element.onkeydown = (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 8 : -8;
+      applyUserReadingAnchor((readerDotAnchorIndexRef.current ?? activeWordIndexRef.current) + step);
+    };
+  };
+
   const positionReaderDotAtWord = (index: number) => {
     if (!readerDotEnabledRef.current) return;
     const word = readerWordsRef.current[index];
@@ -693,7 +916,13 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     const containerRect = container.getBoundingClientRect();
     const documentTop = rect.top - containerRect.top + container.scrollTop;
     const iframeRect = word.iframe.getBoundingClientRect();
-    const left = Math.max(7, iframeRect.left - containerRect.left + 11);
+    const body = word.node.ownerDocument.body;
+    const computedPadding = Number.parseFloat(
+      body ? word.node.ownerDocument.defaultView?.getComputedStyle(body).paddingLeft || "0" : "0"
+    );
+    const textLeft =
+      iframeRect.left + (Number.isFinite(computedPadding) ? computedPadding : 24);
+    const left = Math.max(7, textLeft - containerRect.left - 18);
     const dot =
       readerDotElementRef.current && container.contains(readerDotElementRef.current)
         ? readerDotElementRef.current
@@ -707,18 +936,125 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             element.style.borderRadius = "9999px";
             element.style.pointerEvents = "none";
             element.style.opacity = "0";
-            element.style.transition = "top 0.32s ease, left 0.32s ease, opacity 0.2s ease";
+            element.style.transition =
+              "top 0.32s ease, left 0.32s ease, opacity 0.2s ease, transform 0.16s ease";
             element.style.zIndex = "50";
             container.appendChild(element);
             readerDotElementRef.current = element;
+            makeReaderDotInteractive(element, container);
             return element;
           })();
+    makeReaderDotInteractive(dot, container);
     dot.style.left = `${left}px`;
     dot.style.top = `${Math.max(6, documentTop + rect.height / 2 - 5)}px`;
     dot.style.opacity = "1";
+    dot.setAttribute("aria-valuenow", `${index + 1}`);
+    dot.setAttribute("aria-valuemax", `${readerWordsRef.current.length}`);
+    readerDotAnchorIndexRef.current = index;
+  };
+
+  const monitorUserReaderDotVisibility = (container: HTMLElement) => {
+    if (
+      readingModeRef.current !== "standard" ||
+      Date.now() >= readerDotUserAnchorUntilRef.current
+    ) {
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+        readerDotOffscreenTimerRef.current = null;
+      }
+      return false;
+    }
+    const dot = readerDotElementRef.current;
+    if (!dot || !container.contains(dot)) {
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+        readerDotOffscreenTimerRef.current = null;
+      }
+      return false;
+    }
+    if (dot.dataset.dragging === "true") {
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+        readerDotOffscreenTimerRef.current = null;
+      }
+      return true;
+    }
+    const dotRect = dot.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const edgeTolerance = 2;
+    const isOffscreen =
+      dotRect.bottom < containerRect.top - edgeTolerance ||
+      dotRect.top > containerRect.bottom + edgeTolerance;
+    if (!isOffscreen) {
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+        readerDotOffscreenTimerRef.current = null;
+      }
+      return true;
+    }
+
+    if (!readerDotOffscreenTimerRef.current) {
+      readerDotOffscreenTimerRef.current = window.setTimeout(() => {
+        readerDotOffscreenTimerRef.current = null;
+        if (
+          readingModeRef.current !== "standard" ||
+          !readerDotEnabledRef.current ||
+          Date.now() >= readerDotUserAnchorUntilRef.current
+        ) {
+          return;
+        }
+        const currentDot = readerDotElementRef.current;
+        const currentContainer = scrollContainerRef.current;
+        if (!currentDot || !currentContainer || !currentContainer.contains(currentDot)) {
+          return;
+        }
+        const currentDotRect = currentDot.getBoundingClientRect();
+        const currentContainerRect = currentContainer.getBoundingClientRect();
+        const stillOffscreen =
+          currentDotRect.bottom < currentContainerRect.top - edgeTolerance ||
+          currentDotRect.top > currentContainerRect.bottom + edgeTolerance;
+        if (!stillOffscreen) {
+          return;
+        }
+
+        readerDotUserAnchorUntilRef.current = 0;
+        readerDotAnchorIndexRef.current = null;
+        const location = renditionRef.current?.location;
+        const cfi = location?.end?.cfi ?? location?.start?.cfi;
+        if (!cfi) {
+          return;
+        }
+        updateLastReadMarker(cfi);
+        const resetDot = readerDotElementRef.current;
+        if (!resetDot) {
+          return;
+        }
+        resetDot.classList.remove("reader-dot-reacquired");
+        void resetDot.offsetWidth;
+        resetDot.classList.add("reader-dot-reacquired");
+        resetDot.title = "Dotty is following the last visible line";
+        const onResetAnimationEnd = (event: AnimationEvent) => {
+          if (event.target !== resetDot || event.animationName !== "readerDotReacquire") {
+            return;
+          }
+          resetDot.classList.remove("reader-dot-reacquired");
+          resetDot.removeEventListener("animationend", onResetAnimationEnd);
+        };
+        resetDot.addEventListener("animationend", onResetAnimationEnd);
+      }, 5000);
+    }
+    return true;
   };
 
   const scrollWordIntoReadingBand = (index: number) => {
+    if (
+      readingModeRef.current === "smart" &&
+      (Date.now() < smartManualOverrideUntilRef.current ||
+        (smartAheadTargetIndexRef.current !== null &&
+          index < smartAheadTargetIndexRef.current - 6))
+    ) {
+      return;
+    }
     const word = readerWordsRef.current[index];
     const container = ensureScrollContainer();
     if (!word || !container) return;
@@ -726,9 +1062,8 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     if (!rect) return;
     const containerRect = container.getBoundingClientRect();
     const relativeTop = rect.top - containerRect.top;
-    const upperBand = container.clientHeight * 0.27;
     const lowerBand = container.clientHeight * (readingModeRef.current === "speed" ? 0.7 : 0.64);
-    if (relativeTop < upperBand || relativeTop > lowerBand) {
+    if (relativeTop > lowerBand) {
       programmaticScrollUntilRef.current = Date.now() + 850;
       container.scrollTo({
         top: Math.max(0, container.scrollTop + relativeTop - container.clientHeight * 0.38),
@@ -739,6 +1074,12 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
   const prepareReaderWords = (startAtViewport = false) => {
     const rendition = renditionRef.current;
+    const previousWordCount = readerWordsRef.current.length;
+    const previousAnchor = readerDotAnchorIndexRef.current;
+    const preserveUserAnchor =
+      Date.now() < readerDotUserAnchorUntilRef.current &&
+      previousAnchor !== null &&
+      previousWordCount > 0;
     const words: ReaderWord[] = [];
     const contentsList = rendition?.getContents?.() ?? [];
     contentsList.forEach((contents: any) => {
@@ -801,13 +1142,17 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     });
     readerWordsRef.current = words;
     manualReadingRef.current = null;
-    const nextIndex =
-      startAtViewport && words.length > 0 && readingModeRef.current !== "standard"
+    const nextIndex = preserveUserAnchor
+      ? Math.round((previousAnchor / Math.max(1, previousWordCount - 1)) * Math.max(0, words.length - 1))
+      : startAtViewport && words.length > 0
         ? findNearestWordIndex()
         : Math.min(activeWordIndexRef.current, Math.max(0, words.length - 1));
     activeWordIndexRef.current = Math.min(Math.max(0, nextIndex), Math.max(0, words.length - 1));
+    readerDotAnchorIndexRef.current = activeWordIndexRef.current;
     if (readingModeRef.current !== "standard" && words.length > 0) {
       setReadingWord(buildReadingWordState(activeWordIndexRef.current));
+    } else if (readerDotEnabledRef.current && words.length > 0) {
+      window.requestAnimationFrame(() => positionReaderDotAtWord(activeWordIndexRef.current));
     }
   };
 
@@ -846,6 +1191,60 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     saveSmartReadProfile(accountEmail, next);
   };
 
+  const cancelSmartAheadTracking = () => {
+    if (smartAheadTimerRef.current) {
+      window.clearTimeout(smartAheadTimerRef.current);
+      smartAheadTimerRef.current = null;
+    }
+    smartAheadTargetIndexRef.current = null;
+    smartManualOverrideUntilRef.current = Date.now() + 650;
+  };
+
+  const scheduleSmartAheadBoost = (viewportIndex: number) => {
+    smartAheadTargetIndexRef.current = Math.max(
+      smartAheadTargetIndexRef.current ?? viewportIndex,
+      viewportIndex
+    );
+    smartManualOverrideUntilRef.current = Number.POSITIVE_INFINITY;
+    if (smartAheadTimerRef.current) {
+      return;
+    }
+    smartAheadTimerRef.current = window.setTimeout(() => {
+      smartAheadTimerRef.current = null;
+      if (readingModeRef.current !== "smart") {
+        smartAheadTargetIndexRef.current = null;
+        return;
+      }
+      const currentViewportIndex = findNearestWordIndex();
+      const currentDotIndex = activeWordIndexRef.current;
+      const lead = currentViewportIndex - currentDotIndex;
+      if (lead < 12) {
+        cancelSmartAheadTracking();
+        return;
+      }
+      smartAheadTargetIndexRef.current = currentViewportIndex;
+      const words = readerWordsRef.current;
+      const calibration = smartCalibrationRef.current;
+      const difficulty = words[currentDotIndex]?.difficulty ?? 1;
+      const baseWpm = getAdaptiveWpm(
+        smartProfileRef.current,
+        book.genres,
+        getReadingTimeBand(),
+        difficulty,
+        calibration
+      );
+      const catchUpWpm = Math.min(
+        calibration.maxWpm,
+        Math.max(baseWpm * 1.3, baseWpm + Math.min(150, lead * 0.85))
+      );
+      smartPaceBiasRef.current = Math.max(
+        1,
+        Math.min(2.2, catchUpWpm / Math.max(1, baseWpm))
+      );
+      setAdaptiveWpm(Math.round(catchUpWpm));
+    }, 2200);
+  };
+
   const observeManualReadingPosition = () => {
     if (Date.now() < programmaticScrollUntilRef.current || readerWordsRef.current.length === 0) {
       return;
@@ -864,18 +1263,31 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         }
       }
     }
-    if (readingModeRef.current !== "standard") {
+    if (readingModeRef.current === "smart") {
+      const lead = index - activeWordIndexRef.current;
+      if (lead >= 12) {
+        scheduleSmartAheadBoost(index);
+      } else if (
+        smartAheadTargetIndexRef.current !== null &&
+        lead <= 6
+      ) {
+        cancelSmartAheadTracking();
+      } else if (lead <= -12) {
+        cancelSmartAheadTracking();
+        smartPaceBiasRef.current = Math.max(0.72, smartPaceBiasRef.current * 0.9);
+      }
+    } else if (readingModeRef.current === "speed") {
       activeWordIndexRef.current = index;
       setReadingWord(buildReadingWordState(index));
-      if (readingModeRef.current === "smart") {
-        positionReaderDotAtWord(index);
-      }
     }
     manualReadingRef.current = { index, at: now };
   };
 
   const updateLastReadMarker = (cfi: string) => {
     if (!readerDotEnabledRef.current) {
+      return;
+    }
+    if (Date.now() < readerDotUserAnchorUntilRef.current) {
       return;
     }
     const rendition = renditionRef.current;
@@ -924,7 +1336,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           Math.min(max, Math.max(min, value));
         const containerWidth = container.clientWidth || containerRect.width;
         const textLeft = iframeRect.left - containerRect.left + pad;
-        const trackLeft = clamp(textLeft - 12, 6, Math.max(6, containerWidth - 10));
+        const trackLeft = clamp(textLeft - 18, 6, Math.max(6, containerWidth - 10));
         const target = {
           top: clamp(
             lineTop + container.scrollTop + rect.height / 2 - 6,
@@ -948,13 +1360,16 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                 el.style.borderRadius = "9999px";
                 el.style.pointerEvents = "none";
                 el.style.opacity = "0";
-                el.style.transition = "top 0.4s ease, left 0.4s ease, opacity 0.3s ease";
+                el.style.transition =
+                  "top 0.4s ease, left 0.4s ease, opacity 0.3s ease, transform 0.16s ease";
                 el.style.zIndex = "50";
                 el.style.transform = "translateX(0)";
                 container.appendChild(el);
                 readerDotElementRef.current = el;
+                makeReaderDotInteractive(el, container);
                 return el;
               })();
+        makeReaderDotInteractive(dot, container);
 
         if (!dot.dataset.fixedLeft) {
           dot.style.left = `${target.left}px`;
@@ -985,6 +1400,10 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const removeLastReadMarker = () => {
     if (readerDotTimerRef.current) {
       window.clearTimeout(readerDotTimerRef.current);
+    }
+    if (readerDotOffscreenTimerRef.current) {
+      window.clearTimeout(readerDotOffscreenTimerRef.current);
+      readerDotOffscreenTimerRef.current = null;
     }
     readerDotTimerRef.current = null;
     readerDotRetryRef.current = { cfi: "", count: 0 };
@@ -1138,6 +1557,12 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       return;
     }
     const useSaved = options?.useSaved ?? true;
+    readerDotUserAnchorUntilRef.current = 0;
+    readerDotAnchorIndexRef.current = null;
+    if (readerDotOffscreenTimerRef.current) {
+      window.clearTimeout(readerDotOffscreenTimerRef.current);
+      readerDotOffscreenTimerRef.current = null;
+    }
     const saved = chapterPositionsRef.current[href];
     const target = useSaved && saved ? saved : href;
     void rendition.display(target).then(() => {
@@ -1299,6 +1724,68 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                 text-shadow: 0.22px 0.18px rgba(45, 35, 24, 0.28);
               }
               html[data-reader-finish="paper"] ::selection { background: rgba(30, 111, 66, 0.25); }
+              html[data-reader-finish="dark-paper"] body { color: #eeeae0 !important; }
+              html[data-reader-finish="dark-paper"] p,
+              html[data-reader-finish="dark-paper"] li,
+              html[data-reader-finish="dark-paper"] blockquote,
+              html[data-reader-finish="dark-paper"] td,
+              html[data-reader-finish="dark-paper"] dd {
+                color: rgba(238, 234, 224, 0.96) !important;
+                text-shadow:
+                  0.16px 0 rgba(255, 255, 255, 0.12),
+                  -0.12px 0.16px rgba(0, 0, 0, 0.46);
+                filter: contrast(1.04);
+              }
+              html[data-reader-finish="dark-paper"] h1,
+              html[data-reader-finish="dark-paper"] h2,
+              html[data-reader-finish="dark-paper"] h3,
+              html[data-reader-finish="dark-paper"] h4,
+              html[data-reader-finish="dark-paper"] h5,
+              html[data-reader-finish="dark-paper"] h6 {
+                color: #d9f4e2 !important;
+                text-shadow: 0.2px 0.18px rgba(0, 0, 0, 0.55);
+              }
+              html[data-reader-finish="dark-paper"] ::selection { background: rgba(114, 171, 68, 0.34); }
+              html[data-reader-finish="true-white"] body,
+              html[data-reader-finish="true-white"] p,
+              html[data-reader-finish="true-white"] li,
+              html[data-reader-finish="true-white"] blockquote,
+              html[data-reader-finish="true-white"] td,
+              html[data-reader-finish="true-white"] dd {
+                color: #090a09 !important;
+                text-shadow: none !important;
+                filter: none !important;
+              }
+              html[data-reader-finish="true-white"] h1,
+              html[data-reader-finish="true-white"] h2,
+              html[data-reader-finish="true-white"] h3,
+              html[data-reader-finish="true-white"] h4,
+              html[data-reader-finish="true-white"] h5,
+              html[data-reader-finish="true-white"] h6 {
+                color: #090a09 !important;
+                text-shadow: none !important;
+              }
+              html[data-reader-finish="true-white"] ::selection { background: rgba(79, 123, 55, 0.24); }
+              html[data-reader-finish="true-black"] body,
+              html[data-reader-finish="true-black"] p,
+              html[data-reader-finish="true-black"] li,
+              html[data-reader-finish="true-black"] blockquote,
+              html[data-reader-finish="true-black"] td,
+              html[data-reader-finish="true-black"] dd {
+                color: #f2f1eb !important;
+                text-shadow: none !important;
+                filter: none !important;
+              }
+              html[data-reader-finish="true-black"] h1,
+              html[data-reader-finish="true-black"] h2,
+              html[data-reader-finish="true-black"] h3,
+              html[data-reader-finish="true-black"] h4,
+              html[data-reader-finish="true-black"] h5,
+              html[data-reader-finish="true-black"] h6 {
+                color: #f2f1eb !important;
+                text-shadow: none !important;
+              }
+              html[data-reader-finish="true-black"] ::selection { background: rgba(114, 171, 68, 0.42); }
             `;
             doc.head.appendChild(style);
           } else {
@@ -1311,23 +1798,15 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           doc.body.style.overflowX = "hidden";
           const currentDisplayMode = displayModeRef.current;
           const currentReaderTheme = readerThemeRef.current;
-          const paperFinish = currentDisplayMode === "paper";
-          const contentBg = paperFinish
-            ? "#eee4ce"
-            : currentReaderTheme === "light"
-              ? "#f1f0ea"
-              : "#202227";
-          const contentTexture =
-            paperFinish || currentReaderTheme === "light" ? paperLightTexture : paperDarkTexture;
-          const textureOpacity = paperFinish ? "e0" : "e8";
-          const texturedBackground = `linear-gradient(${contentBg}${textureOpacity}, ${contentBg}${textureOpacity}), url("${contentTexture}")`;
+          const finish = getReaderFinish(currentDisplayMode, currentReaderTheme);
+          const finishBackground = getReaderFinishBackground(finish);
           doc.documentElement.dataset.readerFinish = currentDisplayMode;
-          doc.documentElement.style.backgroundColor = contentBg;
-          doc.body.style.backgroundColor = contentBg;
-          doc.documentElement.style.backgroundImage = texturedBackground;
-          doc.body.style.backgroundImage = texturedBackground;
-          doc.documentElement.style.backgroundSize = "cover";
-          doc.body.style.backgroundSize = "cover";
+          doc.documentElement.style.backgroundColor = finish.background;
+          doc.body.style.backgroundColor = finish.background;
+          doc.documentElement.style.backgroundImage = finishBackground;
+          doc.body.style.backgroundImage = finishBackground;
+          doc.documentElement.style.backgroundSize = finish.texture ? "cover" : "auto";
+          doc.body.style.backgroundSize = finish.texture ? "cover" : "auto";
         });
 
         rendition.themes.register("leaflet-dark", {
@@ -1397,12 +1876,12 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         });
         rendition.themes.register("leaflet-light", {
           html: {
-            background: "#f1f0ea",
+            background: "#edeae2",
             color: "#16191e",
             overflowX: "hidden"
           },
           body: {
-            background: "#f1f0ea",
+            background: "#edeae2",
             color: "#16191e",
             lineHeight: "1.8",
             fontFamily: "Georgia, Cambria, 'Times New Roman', serif",
@@ -1460,15 +1939,10 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             wordBreak: "break-word"
           }
         });
-        rendition.themes.select(
-          displayModeRef.current === "paper" || readerThemeRef.current === "light"
-            ? "leaflet-light"
-            : "leaflet-dark"
-        );
-        if (displayModeRef.current === "paper") {
-          rendition.themes.override("background", "#eee4ce");
-          rendition.themes.override("color", "#30291f");
-        }
+        const initialFinish = getReaderFinish(displayModeRef.current, readerThemeRef.current);
+        rendition.themes.select(initialFinish.themeName);
+        rendition.themes.override("background", initialFinish.background);
+        rendition.themes.override("color", initialFinish.text);
         applyReaderTypography();
         applyReaderInsets();
         const initialFlow = "scrolled-doc";
@@ -1716,30 +2190,26 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     if (!renditionRef.current?.themes) {
       return;
     }
-    const paperFinish = displayMode === "paper";
-    const themeName = paperFinish || readerTheme === "light" ? "leaflet-light" : "leaflet-dark";
-    renditionRef.current.themes.select(themeName);
-    const themeBg = paperFinish ? "#eee4ce" : readerTheme === "light" ? "#f1f0ea" : "#202227";
-    const themeText = paperFinish ? "#30291f" : readerTheme === "light" ? "#16191e" : "#f7f9fc";
-    const themeTexture = paperFinish || readerTheme === "light" ? paperLightTexture : paperDarkTexture;
-    const textureOpacity = paperFinish ? "e0" : "e8";
-    renditionRef.current.themes.override("background", themeBg);
-    renditionRef.current.themes.override("color", themeText);
+    const finish = getReaderFinish(displayMode, readerTheme);
+    renditionRef.current.themes.select(finish.themeName);
+    renditionRef.current.themes.override("background", finish.background);
+    renditionRef.current.themes.override("color", finish.text);
+    const finishBackground = getReaderFinishBackground(finish);
     const contentsList = renditionRef.current.getContents?.() ?? [];
     contentsList.forEach((contents: any) => {
       const doc = contents?.document;
       if (!doc) {
         return;
       }
-      doc.documentElement.style.backgroundColor = themeBg;
-      doc.body.style.backgroundColor = themeBg;
+      doc.documentElement.style.backgroundColor = finish.background;
+      doc.body.style.backgroundColor = finish.background;
       doc.documentElement.dataset.readerFinish = displayMode;
-      doc.documentElement.style.backgroundImage = `linear-gradient(${themeBg}${textureOpacity}, ${themeBg}${textureOpacity}), url("${themeTexture}")`;
-      doc.body.style.backgroundImage = `linear-gradient(${themeBg}${textureOpacity}, ${themeBg}${textureOpacity}), url("${themeTexture}")`;
-      doc.documentElement.style.backgroundSize = "cover";
-      doc.body.style.backgroundSize = "cover";
-      doc.documentElement.style.color = themeText;
-      doc.body.style.color = themeText;
+      doc.documentElement.style.backgroundImage = finishBackground;
+      doc.body.style.backgroundImage = finishBackground;
+      doc.documentElement.style.backgroundSize = finish.texture ? "cover" : "auto";
+      doc.body.style.backgroundSize = finish.texture ? "cover" : "auto";
+      doc.documentElement.style.color = finish.text;
+      doc.body.style.color = finish.text;
     });
     if (readerDotEnabled) {
       ensureScrollContainer();
@@ -1751,6 +2221,15 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   useEffect(() => {
     let activeContainer: HTMLElement | null = null;
     let resizeObserver: ResizeObserver | null = null;
+    const queueManualObservation = (delay = 160) => {
+      if (manualScrollTimerRef.current) {
+        window.clearTimeout(manualScrollTimerRef.current);
+      }
+      manualScrollTimerRef.current = window.setTimeout(() => {
+        manualScrollTimerRef.current = null;
+        observeManualReadingPosition();
+      }, delay);
+    };
 
     const onWheel = (event: WheelEvent) => {
       // scroll-only mode
@@ -1758,13 +2237,17 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       if (!target) {
         return;
       }
+      programmaticScrollUntilRef.current = 0;
+      if (readingModeRef.current === "smart") {
+        smartManualOverrideUntilRef.current = Date.now() + 2200;
+      }
       if (event.deltaY > 0) {
         lastWheelDownAtRef.current = Date.now();
         if (isAtScrollBottom(target, 2)) {
           triggerScrollAdvance();
         }
       }
-      window.setTimeout(observeManualReadingPosition, 360);
+      queueManualObservation(120);
       scheduleReaderDotUpdate();
     };
 
@@ -1784,7 +2267,16 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       if (isAtScrollBottom(target, 2) && now - lastWheelDownAtRef.current < 700) {
         triggerScrollAdvance();
       }
-      scheduleReaderDotUpdate();
+      if (now >= programmaticScrollUntilRef.current) {
+        if (readingModeRef.current === "smart") {
+          smartManualOverrideUntilRef.current = now + 2200;
+        }
+        queueManualObservation();
+      }
+      const manualDotActive = monitorUserReaderDotVisibility(target);
+      if (!manualDotActive) {
+        scheduleReaderDotUpdate();
+      }
     };
 
     const attach = (container: HTMLElement) => {
@@ -1808,6 +2300,10 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       resizeObserver = null;
       activeContainer = null;
       lastScrollTopRef.current = null;
+      if (manualScrollTimerRef.current) {
+        window.clearTimeout(manualScrollTimerRef.current);
+        manualScrollTimerRef.current = null;
+      }
     };
 
     const onRendered = () => {
@@ -1920,6 +2416,18 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
   useEffect(() => {
     readingModeRef.current = readingMode;
+    if (readingMode !== "smart") {
+      if (smartAheadTimerRef.current) {
+        window.clearTimeout(smartAheadTimerRef.current);
+        smartAheadTimerRef.current = null;
+      }
+      smartAheadTargetIndexRef.current = null;
+      smartManualOverrideUntilRef.current = 0;
+    }
+    if (readingMode !== "standard" && readerDotOffscreenTimerRef.current) {
+      window.clearTimeout(readerDotOffscreenTimerRef.current);
+      readerDotOffscreenTimerRef.current = null;
+    }
     setAutoScrollActive(false);
     setReadingPaused(false);
     readingPausedRef.current = false;
@@ -1935,10 +2443,23 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       return;
     }
 
-    prepareReaderWords(true);
-    activeWordIndexRef.current = findNearestWordIndex();
+    prepareReaderWords(false);
+    const requestedStart = requestedStartIndexRef.current;
+    const anchoredStart = readerDotAnchorIndexRef.current;
+    const availableWords = readerWordsRef.current.length;
+    activeWordIndexRef.current = Math.min(
+      Math.max(
+        0,
+        requestedStart ?? anchoredStart ?? (availableWords > 0 ? findNearestWordIndex() : 0)
+      ),
+      Math.max(0, availableWords - 1)
+    );
+    requestedStartIndexRef.current = null;
+    readerDotAnchorIndexRef.current = activeWordIndexRef.current;
     setReadingWord(buildReadingWordState(activeWordIndexRef.current));
     if (readingMode === "smart") {
+      smartPaceBiasRef.current = 1;
+      smartAheadTargetIndexRef.current = null;
       const now = Date.now();
       smartSessionRef.current = {
         startedAt: now,
@@ -1979,12 +2500,26 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         const mode = readingModeRef.current;
         let wpm = speedReadWpmRef.current;
         if (mode === "smart") {
-          wpm = getAdaptiveWpm(
+          const calibration = smartCalibrationRef.current;
+          const baseWpm = getAdaptiveWpm(
             smartProfileRef.current,
             book.genres,
             getReadingTimeBand(),
-            word.difficulty
+            word.difficulty,
+            calibration
           );
+          wpm = Math.min(
+            calibration.maxWpm,
+            Math.max(calibration.minWpm, baseWpm * smartPaceBiasRef.current)
+          );
+          const aheadTarget = smartAheadTargetIndexRef.current;
+          if (aheadTarget !== null && index >= aheadTarget - 6) {
+            cancelSmartAheadTracking();
+            smartPaceBiasRef.current = Math.max(1, smartPaceBiasRef.current * 0.82);
+          } else if (aheadTarget === null && smartPaceBiasRef.current > 1) {
+            smartPaceBiasRef.current =
+              1 + (smartPaceBiasRef.current - 1) * 0.985;
+          }
           if (index % 8 === 0) setAdaptiveWpm(Math.round(wpm));
           const session = smartSessionRef.current;
           if (session) {
@@ -2237,6 +2772,48 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   }, [readerDotEnabled]);
 
   const resolvedCover = coverFallback ?? coverSrc;
+  const requestReadingMode = (nextMode: ReadingMode) => {
+    if (nextMode === "standard") {
+      readerDotUserAnchorUntilRef.current = 0;
+      readerDotAnchorIndexRef.current = null;
+      if (readerDotOffscreenTimerRef.current) {
+        window.clearTimeout(readerDotOffscreenTimerRef.current);
+        readerDotOffscreenTimerRef.current = null;
+      }
+      setPendingReadingMode(null);
+      setReadingMode("standard");
+      return;
+    }
+    scheduleReaderWordIndex(true, 0);
+    setReadingPaused(true);
+    setPendingReadingMode(nextMode);
+    setMorePanelOpen(false);
+  };
+
+  const beginReadingMode = (
+    mode: Exclude<ReadingMode, "standard">,
+    source: "dot" | "viewport" | "chapter"
+  ) => {
+    prepareReaderWords(false);
+    const wordCount = readerWordsRef.current.length;
+    let startIndex = 0;
+    if (source === "dot") {
+      startIndex = readerDotAnchorIndexRef.current ?? findNearestWordIndex();
+    } else if (source === "viewport") {
+      startIndex = findNearestWordIndex();
+    }
+    startIndex = Math.min(Math.max(0, startIndex), Math.max(0, wordCount - 1));
+    requestedStartIndexRef.current = startIndex;
+    activeWordIndexRef.current = startIndex;
+    readerDotAnchorIndexRef.current = startIndex;
+    readerDotUserAnchorUntilRef.current = Date.now() + 5 * 60 * 1000;
+    if (readerDotEnabledRef.current && wordCount > 0) {
+      positionReaderDotAtWord(startIndex);
+    }
+    setPendingReadingMode(null);
+    setReadingMode(mode);
+  };
+
   const handleCoverError = () => {
     if (coverTriedRef.current) {
       return;
@@ -2267,22 +2844,17 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       className={`reader-scope fixed inset-0 z-50 h-full w-full overflow-hidden reader-bg ${
         isLight ? "reader-light" : ""
       } ${displayMode === "paper" ? "reader-paper-finish" : ""} ${
+        displayMode === "dark-paper" ? "reader-dark-paper-finish" : ""
+      } ${
+        displayMode === "true-white" ? "reader-true-white-finish" : ""
+      } ${
+        displayMode === "true-black" ? "reader-true-black-finish" : ""
+      } ${
         readingMode === "speed" ? "reader-speed-active" : ""
       }`}
     >
       <header className="reader-toolbar fixed left-0 right-0 top-0 z-50 flex w-full items-center justify-between px-6 py-5 md:px-8 transition-all duration-300">
         <div className="flex items-center gap-4">
-          <button
-            type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-lg border reader-border reader-icon transition reader-hover-accent"
-            onClick={handleToggleSidebar}
-            onMouseEnter={openReaderSidebar}
-            onMouseLeave={scheduleReaderSidebarClose}
-          >
-            <span className="material-symbols-outlined">
-              {sidebarOpen ? "dock_to_left" : "dock_to_right"}
-            </span>
-          </button>
           <button
             type="button"
             className="group flex items-center gap-2 transition-all reader-icon reader-hover-accent"
@@ -2423,6 +2995,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                     onChange={(event) => setDisplayMode(event.target.value as ReaderDisplayMode)}
                   >
                     <option value="paper">Warm paper</option>
+                    <option value="dark-paper">Dark paper</option>
+                    <option value="true-white">True white</option>
+                    <option value="true-black">True black</option>
                     <option value="app">Match app theme</option>
                   </select>
                 </label>
@@ -2431,7 +3006,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                   <select
                     className="reader-select mt-1.5 w-full"
                     value={readingMode}
-                    onChange={(event) => setReadingMode(event.target.value as ReadingMode)}
+                    onChange={(event) => requestReadingMode(event.target.value as ReadingMode)}
                   >
                     <option value="standard">Standard</option>
                     <option value="smart">Smart Read</option>
@@ -2533,7 +3108,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                   className="mt-3 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-xs uppercase tracking-widest transition reader-border reader-pill reader-icon"
                   onClick={() => setReaderDotEnabled((prev) => !prev)}
                 >
-                  <span>Reader dot</span>
+                  <span>Dotty</span>
                   <span className="reader-toggle" data-on={readerDotEnabled} />
                 </button>
               </div>
@@ -2545,7 +3120,8 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       <div className="reader-shell">
         <div
           className="reader-sidebar-hot-zone"
-          onMouseEnter={openReaderSidebar}
+          onMouseEnter={scheduleReaderSidebarOpen}
+          onMouseLeave={cancelReaderSidebarOpen}
           aria-hidden="true"
         />
         <aside
@@ -2564,7 +3140,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
               : "reader-sidebar-closed pointer-events-none"
           }`}
         >
-          <div className="mb-6 flex items-start justify-between gap-3">
+          <div className="mb-6">
             <div>
             {resolvedCover && (
               <div className="book-cover-frame mb-4 h-44 w-32 overflow-hidden border reader-border">
@@ -2576,14 +3152,6 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
               {book.author ?? "Unknown author"}
             </p>
             </div>
-            <button
-              type="button"
-              className="reader-mini-control shrink-0"
-              onClick={() => setSidebarOpen(false)}
-              title="Close chapters"
-            >
-              <span className="material-symbols-outlined text-base">left_panel_close</span>
-            </button>
           </div>
           <div className="text-xs uppercase tracking-[0.3em] reader-muted">Chapters</div>
           <div className="mt-4 flex-1 overflow-y-auto pr-2">
@@ -2680,6 +3248,67 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           )}
         </main>
       </div>
+
+      {pendingReadingMode && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 px-6">
+          <div className="reader-panel reader-border w-full max-w-md rounded-2xl border p-6 shadow-2xl">
+            <div className="text-[10px] uppercase tracking-[0.22em] reader-muted">
+              {pendingReadingMode === "speed" ? "SpeedRead" : "Smart Read"}
+            </div>
+            <h2 className="mt-2 font-headline text-xl font-bold reader-text-color">
+              Where should reading begin?
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed reader-muted">
+              Drag Dotty beside any line, then start from that exact position.
+            </p>
+            <div className="mt-5 grid gap-2">
+              <button
+                type="button"
+                className="reader-start-choice reader-start-choice-primary"
+                onClick={() => beginReadingMode(pendingReadingMode, "dot")}
+              >
+                <span className="material-symbols-outlined">adjust</span>
+                <span>
+                  <strong>Start at Dotty</strong>
+                  <small>Use the line currently marked in the book</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="reader-start-choice"
+                onClick={() => beginReadingMode(pendingReadingMode, "viewport")}
+              >
+                <span className="material-symbols-outlined">center_focus_strong</span>
+                <span>
+                  <strong>Start at current view</strong>
+                  <small>Use the line near the centre of the page</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="reader-start-choice"
+                onClick={() => beginReadingMode(pendingReadingMode, "chapter")}
+              >
+                <span className="material-symbols-outlined">first_page</span>
+                <span>
+                  <strong>Start at chapter beginning</strong>
+                  <small>Begin from the first indexed word</small>
+                </span>
+              </button>
+            </div>
+            <button
+              type="button"
+              className="reader-start-cancel mt-4 w-full py-2 text-xs uppercase tracking-widest reader-muted transition"
+              onClick={() => {
+                setPendingReadingMode(null);
+                setReadingPaused(false);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {activeSession && (
         <div className={`leaflet-mug ${coffeeProgress >= 0.99 ? "leaflet-mug-done" : ""}`}>

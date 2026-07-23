@@ -19,12 +19,6 @@ export const Sidebar = ({ activeItem, onNavigate, onStartReading, startDisabled 
       className="leather-surface leaflet-sidebar absolute inset-y-0 left-0 z-40 flex h-full flex-col border-r border-black/60 py-5"
       aria-label="Primary navigation"
     >
-      <div className="sidebar-heading mb-5 flex h-9 items-center overflow-hidden">
-        <span className="sidebar-spine-mark" aria-hidden="true">L</span>
-        <span className="sidebar-copy text-[11px] font-bold uppercase tracking-[0.22em] text-white/78">
-          Your archive
-        </span>
-      </div>
       <nav className="flex-1 space-y-2 text-sm">
         {navItems.map((item) => (
           <button

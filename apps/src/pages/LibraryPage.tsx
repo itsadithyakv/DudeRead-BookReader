@@ -113,7 +113,6 @@ export const LibraryPage = ({ onOpenBook, onNavigate, showToast }: LibraryPagePr
   const totalBooks = books.length;
   const finishedBooks = books.filter((book) => book.progress >= 1).length;
   const streakTitle = stats.streakDays > 0 ? `${stats.streakDays} Day Streak!` : "Start Your Streak";
-  const streakBadge = stats.streakDays > 0 ? "Streak Active" : "Ritual Ready";
 
   const handleImport = () => {
     importBooks().catch((error) => {
@@ -308,9 +307,6 @@ export const LibraryPage = ({ onOpenBook, onNavigate, showToast }: LibraryPagePr
               >
                 <div className="min-w-0">
                   <div>
-                    <div className="mb-3 inline-flex items-center gap-2 rounded-xl border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-primary shadow-inset">
-                      {streakBadge}
-                    </div>
                     <h1 className="page-title text-4xl md:text-5xl">{streakTitle}</h1>
                   </div>
                 </div>

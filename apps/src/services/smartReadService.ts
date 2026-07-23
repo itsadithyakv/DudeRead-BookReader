@@ -24,8 +24,17 @@ export type SmartReadSample = {
   rereads: number;
 };
 
+export type SmartReadCalibration = {
+  minWpm: number;
+  maxWpm: number;
+};
+
 const STORAGE_PREFIX = "leaflet.smart-read.v1";
 const DEFAULT_WPM = 185;
+export const DEFAULT_SMART_READ_CALIBRATION: SmartReadCalibration = {
+  minWpm: 120,
+  maxWpm: 320
+};
 const COMMON_RSVP_WORDS = new Set(
   `
   a about after again against all also am an and any are as at back be because been before being
@@ -63,6 +72,49 @@ const createDefaultProfile = (): SmartReadProfile => ({
 
 const profileKey = (userId: string | null) =>
   `${STORAGE_PREFIX}.${encodeURIComponent(userId?.trim().toLowerCase() || "offline")}`;
+
+const calibrationKey = (userId: string | null) =>
+  `${STORAGE_PREFIX}.calibration.${encodeURIComponent(userId?.trim().toLowerCase() || "offline")}`;
+
+export const normalizeSmartReadCalibration = (
+  value: Partial<SmartReadCalibration> | null | undefined
+): SmartReadCalibration => {
+  const minWpm = clamp(
+    Math.round(Number(value?.minWpm) || DEFAULT_SMART_READ_CALIBRATION.minWpm),
+    70,
+    480
+  );
+  const maxWpm = clamp(
+    Math.round(Number(value?.maxWpm) || DEFAULT_SMART_READ_CALIBRATION.maxWpm),
+    minWpm + 20,
+    500
+  );
+  return { minWpm: Math.min(minWpm, maxWpm - 20), maxWpm };
+};
+
+export const loadSmartReadCalibration = (userId: string | null): SmartReadCalibration => {
+  try {
+    const raw = localStorage.getItem(calibrationKey(userId));
+    return raw
+      ? normalizeSmartReadCalibration(JSON.parse(raw) as Partial<SmartReadCalibration>)
+      : { ...DEFAULT_SMART_READ_CALIBRATION };
+  } catch {
+    return { ...DEFAULT_SMART_READ_CALIBRATION };
+  }
+};
+
+export const saveSmartReadCalibration = (
+  userId: string | null,
+  calibration: SmartReadCalibration
+) => {
+  const normalized = normalizeSmartReadCalibration(calibration);
+  try {
+    localStorage.setItem(calibrationKey(userId), JSON.stringify(normalized));
+  } catch {
+    // Reading should continue if local persistence is unavailable.
+  }
+  return normalized;
+};
 
 const normalizePace = (value: unknown): ReadingPace => {
   const pace = value as Partial<ReadingPace> | null;
@@ -168,8 +220,10 @@ export const getAdaptiveWpm = (
   profile: SmartReadProfile,
   genres: string[],
   timeBand: ReadingTimeBand,
-  difficulty: number
+  difficulty: number,
+  calibration: SmartReadCalibration = DEFAULT_SMART_READ_CALIBRATION
 ) => {
+  const range = normalizeSmartReadCalibration(calibration);
   const genrePaces = genres
     .map(normalizeGenre)
     .map((genre) => profile.genres[genre])
@@ -187,7 +241,11 @@ export const getAdaptiveWpm = (
     genreWpm * genreWeight +
     timePace.wpm * timeWeight;
   const rereadAdjustment = 1 - Math.min(0.18, profile.rereadRate * 0.4);
-  return clamp((learned * rereadAdjustment) / clamp(difficulty, 0.85, 1.7), 70, 330);
+  return clamp(
+    (learned * rereadAdjustment) / clamp(difficulty, 0.85, 1.7),
+    range.minWpm,
+    range.maxWpm
+  );
 };
 
 const updatePace = (current: ReadingPace, observedWpm: number, weight: number): ReadingPace => {
