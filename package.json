@@ -1,0 +1,9 @@
+{
+  "name": "leaflet-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix ./apps run dev",
+    "build": "npm --prefix ./apps run build",
+    "tauri": "npm --prefix ./apps run tauri --"
+  }
+}
