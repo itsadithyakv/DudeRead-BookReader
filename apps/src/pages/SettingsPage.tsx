@@ -5,6 +5,7 @@ import { useAccountStore } from "../store/accountStore";
 import { useAppearanceStore, type ThemeMode } from "../store/appearanceStore";
 import { converterService } from "../services/converterService";
 import { bookService } from "../services/bookService";
+import { clearSmartReadProfiles } from "../services/smartReadService";
 import { UiIcon } from "../components/UiIcon";
 
 export type SettingsPageProps = {
@@ -118,6 +119,7 @@ export const SettingsPage = ({ showToast }: SettingsPageProps) => {
         resetHabits();
         resetAccount();
         resetAppearance();
+        clearSmartReadProfiles();
         showToast("All data removed.");
       })
       .catch((error) => {

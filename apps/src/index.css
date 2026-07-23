@@ -385,11 +385,13 @@ body::before {
 .reader-container {
   background: var(--reader-shell-bg, #000);
   scrollbar-gutter: stable both-edges;
-  transition: filter 0.2s ease;
+  transition: opacity 0.24s ease, filter 0.24s ease;
 }
 
 .reader-shell {
-  transition: gap 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
 }
 
 .reader-sidebar {
@@ -397,28 +399,58 @@ body::before {
   --reader-muted: #bec6d2;
   --reader-icon: #e1e6ed;
   --reader-hover-bg: rgba(255, 255, 255, 0.07);
-  will-change: width, opacity, transform;
+  position: absolute;
+  top: 6rem;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  will-change: opacity, transform;
   transition:
-    width 0.55s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.35s ease,
-    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+    opacity 0.2s ease,
+    visibility 0s linear 0s,
+    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 12px 0 24px rgba(0, 0, 0, 0.26);
+}
+
+.reader-sidebar-hot-zone {
+  position: absolute;
+  top: 6rem;
+  bottom: 0;
+  left: 0;
+  z-index: 39;
+  width: 18px;
 }
 
 .reader-sidebar-open {
   transform: translateX(0);
+  opacity: 1;
+  visibility: visible;
 }
 
 .reader-sidebar-closed {
-  transform: translateX(-8px);
+  transform: translateX(calc(-100% - 14px));
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.18s ease,
+    visibility 0s linear 0.32s,
+    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .reader-main {
-  transition: padding 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  position: absolute;
+  inset: 6rem 0 0;
+  z-index: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
-.reader-animating .reader-container {
-  filter: blur(0.6px);
-  transition: filter 0.2s ease;
+.reader-page-frame,
+.reader-container {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .reader-transition-mask {
@@ -921,6 +953,170 @@ body::before {
   position: relative;
   z-index: 1;
   min-height: 100vh;
+}
+
+.reader-paper-finish {
+  --reader-shell-bg: #eee4ce;
+}
+
+.reader-paper-finish .reader-page-frame {
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.45),
+    inset 13px 0 22px rgba(67, 48, 25, 0.055);
+}
+
+.reader-select {
+  appearance: none;
+  border: 1px solid var(--reader-border);
+  border-radius: 8px;
+  background-color: var(--reader-panel-soft);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--reader-muted) 50%),
+    linear-gradient(135deg, var(--reader-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) calc(50% - 2px),
+    calc(100% - 10px) calc(50% - 2px);
+  background-repeat: no-repeat;
+  background-size: 5px 5px, 5px 5px;
+  color: var(--reader-text);
+  padding: 0.55rem 2rem 0.55rem 0.7rem;
+  outline: none;
+}
+
+.reader-select:focus-visible {
+  border-color: var(--reader-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--reader-accent) 24%, transparent);
+}
+
+.reader-mini-control {
+  display: inline-flex;
+  min-width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--reader-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--reader-panel-soft) 86%, transparent);
+  color: var(--reader-icon);
+  transition: color 0.18s ease, background 0.18s ease, transform 0.18s ease;
+}
+
+.reader-mini-control:hover {
+  color: var(--reader-accent);
+  background: var(--reader-hover-bg);
+}
+
+.reader-mini-control:active {
+  transform: translateY(1px);
+}
+
+.reader-chapter-link {
+  border: 1px solid transparent;
+}
+
+.reader-chapter-link:hover {
+  border-color: color-mix(in srgb, var(--reader-border) 65%, transparent);
+  background: rgba(255, 255, 255, 0.065);
+  color: #ffffff;
+}
+
+.reader-chapter-active {
+  border-color: rgba(96, 192, 128, 0.32);
+  background:
+    linear-gradient(180deg, rgba(61, 129, 83, 0.3), rgba(31, 80, 49, 0.34));
+  color: #f4fff7;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.reader-chapter-dock {
+  opacity: 0.34;
+  transform: translateX(-50%) scale(0.84);
+  transform-origin: bottom center;
+  filter: saturate(0.75);
+  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.22s ease;
+}
+
+.reader-chapter-dock:hover,
+.reader-chapter-dock:focus-within {
+  opacity: 0.94;
+  transform: translateX(-50%) scale(1);
+  filter: saturate(1);
+}
+
+.reader-chapter-dock > div {
+  background: color-mix(in srgb, var(--reader-panel) 72%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 5px 13px rgba(0, 0, 0, 0.16);
+}
+
+.reader-speed-active .reader-container {
+  opacity: 0.26;
+  filter: saturate(0.45) contrast(0.9);
+}
+
+.reader-speedread-overlay {
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--reader-bg) 86%, transparent) 0%,
+      color-mix(in srgb, var(--reader-bg) 62%, transparent) 44%,
+      color-mix(in srgb, var(--reader-bg) 82%, transparent) 100%
+    );
+}
+
+.reader-rsvp-word {
+  min-width: min(760px, 76vw);
+  padding: 1.1rem 2rem 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--reader-border) 75%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--reader-panel) 88%, transparent);
+  color: var(--reader-text);
+  font-family: Georgia, Cambria, "Times New Roman", serif;
+  font-size: clamp(2.8rem, 7vw, 6.8rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.012em;
+  text-align: center;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.16);
+}
+
+.reader-rsvp-focus {
+  color: var(--reader-accent);
+}
+
+.reader-rsvp-context {
+  max-height: 9.2rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--reader-border) 68%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--reader-panel) 88%, transparent);
+  padding: 1rem 1.25rem;
+  color: var(--reader-muted);
+  font-family: Georgia, Cambria, "Times New Roman", serif;
+  font-size: clamp(0.95rem, 1.35vw, 1.2rem);
+  line-height: 1.8;
+  text-align: center;
+  box-shadow: 0 9px 22px rgba(0, 0, 0, 0.14);
+  animation: readerContextIn 0.35s ease both;
+}
+
+.reader-rsvp-current {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--reader-accent) 28%, transparent);
+  color: var(--reader-text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--reader-accent) 28%, transparent);
+}
+
+@keyframes readerContextIn {
+  from {
+    opacity: 0.28;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .app-shell {

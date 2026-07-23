@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import type { Book } from "@shared/models/book";
 import ePub from "epubjs";
 import { bookService } from "../services/bookService";
@@ -7,6 +7,17 @@ import { useLibraryStore } from "../store/libraryStore";
 import { getSessionProgress, useHabitStore } from "../store/habitStore";
 import { converterService } from "../services/converterService";
 import { useAppearanceStore } from "../store/appearanceStore";
+import { useAccountStore } from "../store/accountStore";
+import {
+  estimateWordDifficulty,
+  estimateRsvpPauseMultiplier,
+  getAdaptiveWpm,
+  getReadingTimeBand,
+  loadSmartReadProfile,
+  recordSmartReadSample,
+  saveSmartReadProfile,
+  type SmartReadProfile
+} from "../services/smartReadService";
 import paperLightTexture from "../assets/paper-light.webp";
 import paperDarkTexture from "../assets/paper-dark.webp";
 import ztNatureBoldWoff2 from "../assets/fonts/ZTNature-Bold.woff2";
@@ -26,6 +37,41 @@ type TocItem = {
   label: string;
   href: string;
   subitems?: TocItem[];
+};
+
+type ReaderDisplayMode = "paper" | "app";
+type ReadingMode = "standard" | "smart" | "speed";
+
+type ReaderWord = {
+  text: string;
+  trailing: string;
+  node: Text;
+  start: number;
+  end: number;
+  difficulty: number;
+  rsvpPauseMultiplier: number;
+  sentenceEnd: boolean;
+  paragraphEnd: boolean;
+  iframe: HTMLIFrameElement;
+};
+
+type ReadingWordState = {
+  index: number;
+  total: number;
+  text: string;
+  contextStart: number;
+  context: Array<{ text: string; trailing: string; index: number }>;
+};
+
+type SmartSession = {
+  startedAt: number;
+  activeMs: number;
+  lastTickAt: number;
+  startIndex: number;
+  furthestIndex: number;
+  difficultyTotal: number;
+  difficultySamples: number;
+  rereads: number;
 };
 
 const flattenToc = (items: TocItem[]) => {
@@ -101,10 +147,20 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const autoScrollLastTimeRef = useRef<number | null>(null);
   const autoScrollCarryRef = useRef(0);
   const readerDotTimerRef = useRef<number | null>(null);
+  const wordIndexTimerRef = useRef<number | null>(null);
+  const sidebarCloseTimerRef = useRef<number | null>(null);
   const readerDotRetryRef = useRef<{ cfi: string; count: number }>({ cfi: "", count: 0 });
   const readerDotElementRef = useRef<HTMLElement | null>(null);
-  const sidebarAnimTimerRef = useRef<number | null>(null);
-  const sidebarUiTimerRef = useRef<number | null>(null);
+  const readerDotEnabledRef = useRef(true);
+  const readingEngineTimerRef = useRef<number | null>(null);
+  const readingModeRef = useRef<ReadingMode>("standard");
+  const readingPausedRef = useRef(false);
+  const speedReadWpmRef = useRef(260);
+  const readerWordsRef = useRef<ReaderWord[]>([]);
+  const activeWordIndexRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
+  const smartSessionRef = useRef<SmartSession | null>(null);
+  const manualReadingRef = useRef<{ index: number; at: number } | null>(null);
   const activeSession = useHabitStore((state) => state.activeSession);
   const focusSettings = useHabitStore((state) => state.focusSettings);
   const stopSession = useHabitStore((state) => state.stopSession);
@@ -122,7 +178,6 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteSessionId, setNoteSessionId] = useState<string | null>(null);
-  const [sidebarAnimating, setSidebarAnimating] = useState(false);
 
   useEffect(() => {
     if (!activeSession) {
@@ -288,7 +343,11 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           return;
         }
         event.preventDefault();
-        setAutoScrollActive((prev) => !prev);
+        if (readingModeRef.current === "standard") {
+          setAutoScrollActive((prev) => !prev);
+        } else {
+          setReadingPaused((prev) => !prev);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -300,11 +359,14 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       if (scrollAdvanceTimerRef.current) {
         window.clearTimeout(scrollAdvanceTimerRef.current);
       }
-      if (sidebarAnimTimerRef.current) {
-        window.clearTimeout(sidebarAnimTimerRef.current);
+      if (readingEngineTimerRef.current) {
+        window.clearTimeout(readingEngineTimerRef.current);
       }
-      if (sidebarUiTimerRef.current) {
-        window.clearTimeout(sidebarUiTimerRef.current);
+      if (wordIndexTimerRef.current) {
+        window.clearTimeout(wordIndexTimerRef.current);
+      }
+      if (sidebarCloseTimerRef.current) {
+        window.clearTimeout(sidebarCloseTimerRef.current);
       }
       if (checkpointTimerRef.current) {
         window.clearTimeout(checkpointTimerRef.current);
@@ -331,6 +393,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       return JSON.parse(raw) as {
         fontSize?: number;
         sidebarOpen?: boolean;
+        displayMode?: ReaderDisplayMode;
+        autoScrollSpeed?: number;
+        speedReadWpm?: number;
         cfi?: string;
         chapterPositions?: Record<string, string>;
       };
@@ -340,15 +405,29 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   };
 
   const initialPrefs = readPrefs();
-  const [sidebarOpen, setSidebarOpen] = useState(initialPrefs?.sidebarOpen ?? true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [fontSize, setFontSize] = useState(initialPrefs?.fontSize ?? 18);
   const fontSizeRef = useRef(fontSize);
   const sidebarRef = useRef(sidebarOpen);
   const [fontPanelOpen, setFontPanelOpen] = useState(false);
   const [autoScrollActive, setAutoScrollActive] = useState(false);
-  const [autoScrollSpeed, setAutoScrollSpeed] = useState(45);
+  const [autoScrollSpeed, setAutoScrollSpeed] = useState(initialPrefs?.autoScrollSpeed ?? 35);
+  const [displayMode, setDisplayMode] = useState<ReaderDisplayMode>(
+    initialPrefs?.displayMode ?? "paper"
+  );
+  const [readingMode, setReadingMode] = useState<ReadingMode>("standard");
+  const [readingPaused, setReadingPaused] = useState(false);
+  const [speedReadWpm, setSpeedReadWpm] = useState(
+    Math.min(1000, Math.max(120, initialPrefs?.speedReadWpm ?? 260))
+  );
+  const [readingWord, setReadingWord] = useState<ReadingWordState | null>(null);
+  const [adaptiveWpm, setAdaptiveWpm] = useState(185);
   const readerTheme = useAppearanceStore((state) => state.theme);
+  const displayModeRef = useRef<ReaderDisplayMode>(displayMode);
+  const readerThemeRef = useRef(readerTheme);
   const toggleTheme = useAppearanceStore((state) => state.toggleTheme);
+  const accountEmail = useAccountStore((state) => state.email);
+  const smartProfileRef = useRef<SmartReadProfile>(loadSmartReadProfile(accountEmail));
   const [morePanelOpen, setMorePanelOpen] = useState(false);
   const morePanelRef = useRef<HTMLDivElement | null>(null);
   const morePanelCloseRef = useRef<number | null>(null);
@@ -409,8 +488,15 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     setBookmarkPanelOpen(false);
     setFontPanelOpen(false);
     setAutoScrollActive(false);
+    setReadingMode("standard");
+    setReadingPaused(false);
+    setReadingWord(null);
     setMorePanelOpen(false);
   }, [book.id]);
+
+  useEffect(() => {
+    smartProfileRef.current = loadSmartReadProfile(accountEmail);
+  }, [accountEmail]);
 
   useEffect(() => {
     if (!morePanelOpen) {
@@ -449,47 +535,30 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     rendition.themes.override("box-sizing", "border-box");
   };
 
-  const freezeReaderLayout = () => {
-    if (sidebarAnimTimerRef.current) {
-      window.clearTimeout(sidebarAnimTimerRef.current);
-      sidebarAnimTimerRef.current = null;
-    }
-    const viewer = viewerRef.current;
-    if (!viewer) {
+  const handleToggleSidebar = () => {
+    if (sidebarOpen) {
+      setSidebarOpen(false);
       return;
     }
-    const rect = viewer.getBoundingClientRect();
-    if (!rect.width) {
-      return;
-    }
-    viewer.style.width = `${rect.width}px`;
-    viewer.style.maxWidth = `${rect.width}px`;
-    viewer.style.transition = "none";
-    sidebarAnimTimerRef.current = window.setTimeout(() => {
-      viewer.style.width = "100%";
-      viewer.style.maxWidth = "100%";
-      viewer.style.transition = "";
-      sidebarAnimTimerRef.current = null;
-      const container = viewerRef.current;
-      if (container && renditionRef.current?.resize) {
-        renditionRef.current.resize(container.clientWidth, container.clientHeight);
-      }
-    }, 480);
+    openReaderSidebar();
   };
 
-  const handleToggleSidebar = () => {
-    freezeReaderLayout();
-    setSidebarAnimating(true);
-    if (sidebarUiTimerRef.current) {
-      window.clearTimeout(sidebarUiTimerRef.current);
+  const openReaderSidebar = () => {
+    if (sidebarCloseTimerRef.current) {
+      window.clearTimeout(sidebarCloseTimerRef.current);
+      sidebarCloseTimerRef.current = null;
     }
-    sidebarUiTimerRef.current = window.setTimeout(() => {
-      setSidebarAnimating(false);
-      sidebarUiTimerRef.current = null;
-    }, 520);
-    window.requestAnimationFrame(() => {
-      setSidebarOpen((prev) => !prev);
-    });
+    setSidebarOpen(true);
+  };
+
+  const scheduleReaderSidebarClose = () => {
+    if (sidebarCloseTimerRef.current) {
+      window.clearTimeout(sidebarCloseTimerRef.current);
+    }
+    sidebarCloseTimerRef.current = window.setTimeout(() => {
+      setSidebarOpen(false);
+      sidebarCloseTimerRef.current = null;
+    }, 220);
   };
 
   const ensureSingleScrollContainer = () => {
@@ -541,8 +610,272 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     });
   };
 
+  const getReaderWordRect = (word: ReaderWord) => {
+    try {
+      const range = word.node.ownerDocument.createRange();
+      range.setStart(word.node, word.start);
+      range.setEnd(word.node, word.end);
+      const rects = range.getClientRects();
+      const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+      if (!rect || (!rect.width && !rect.height)) {
+        return null;
+      }
+      const iframeRect = word.iframe.getBoundingClientRect();
+      return {
+        top: iframeRect.top + rect.top,
+        left: iframeRect.left + rect.left,
+        width: rect.width,
+        height: rect.height
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const findNearestWordIndex = (targetRatio = 0.38) => {
+    const words = readerWordsRef.current;
+    const container = ensureScrollContainer();
+    if (!container || words.length === 0) {
+      return 0;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const targetTop = containerRect.top + containerRect.height * targetRatio;
+    let nearestIndex = activeWordIndexRef.current;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    let low = 0;
+    let high = words.length - 1;
+    while (low <= high) {
+      const index = Math.floor((low + high) / 2);
+      const rect = getReaderWordRect(words[index]);
+      if (!rect) {
+        low = index + 1;
+        continue;
+      }
+      const distance = Math.abs(rect.top + rect.height / 2 - targetTop);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+      if (rect.top + rect.height / 2 < targetTop) {
+        low = index + 1;
+      } else {
+        high = index - 1;
+      }
+    }
+    return nearestIndex;
+  };
+
+  const buildReadingWordState = (index: number): ReadingWordState | null => {
+    const words = readerWordsRef.current;
+    const word = words[index];
+    if (!word) return null;
+    const contextStart = Math.floor(index / 42) * 42;
+    return {
+      index,
+      total: words.length,
+      text: word.text,
+      contextStart,
+      context: words.slice(contextStart, contextStart + 42).map((entry, offset) => ({
+        text: entry.text,
+        trailing: entry.trailing,
+        index: contextStart + offset
+      }))
+    };
+  };
+
+  const positionReaderDotAtWord = (index: number) => {
+    if (!readerDotEnabledRef.current) return;
+    const word = readerWordsRef.current[index];
+    const container = ensureScrollContainer();
+    if (!word || !container) return;
+    const rect = getReaderWordRect(word);
+    if (!rect) return;
+    const containerRect = container.getBoundingClientRect();
+    const documentTop = rect.top - containerRect.top + container.scrollTop;
+    const iframeRect = word.iframe.getBoundingClientRect();
+    const left = Math.max(7, iframeRect.left - containerRect.left + 11);
+    const dot =
+      readerDotElementRef.current && container.contains(readerDotElementRef.current)
+        ? readerDotElementRef.current
+        : (() => {
+            const element = document.createElement("div");
+            element.id = "reader-lastline-dot";
+            element.className = "reader-dot";
+            element.style.position = "absolute";
+            element.style.width = "10px";
+            element.style.height = "10px";
+            element.style.borderRadius = "9999px";
+            element.style.pointerEvents = "none";
+            element.style.opacity = "0";
+            element.style.transition = "top 0.32s ease, left 0.32s ease, opacity 0.2s ease";
+            element.style.zIndex = "50";
+            container.appendChild(element);
+            readerDotElementRef.current = element;
+            return element;
+          })();
+    dot.style.left = `${left}px`;
+    dot.style.top = `${Math.max(6, documentTop + rect.height / 2 - 5)}px`;
+    dot.style.opacity = "1";
+  };
+
+  const scrollWordIntoReadingBand = (index: number) => {
+    const word = readerWordsRef.current[index];
+    const container = ensureScrollContainer();
+    if (!word || !container) return;
+    const rect = getReaderWordRect(word);
+    if (!rect) return;
+    const containerRect = container.getBoundingClientRect();
+    const relativeTop = rect.top - containerRect.top;
+    const upperBand = container.clientHeight * 0.27;
+    const lowerBand = container.clientHeight * (readingModeRef.current === "speed" ? 0.7 : 0.64);
+    if (relativeTop < upperBand || relativeTop > lowerBand) {
+      programmaticScrollUntilRef.current = Date.now() + 850;
+      container.scrollTo({
+        top: Math.max(0, container.scrollTop + relativeTop - container.clientHeight * 0.38),
+        behavior: "smooth"
+      });
+    }
+  };
+
+  const prepareReaderWords = (startAtViewport = false) => {
+    const rendition = renditionRef.current;
+    const words: ReaderWord[] = [];
+    const contentsList = rendition?.getContents?.() ?? [];
+    contentsList.forEach((contents: any) => {
+      const doc = contents?.document as Document | undefined;
+      const iframe =
+        (contents?.iframe as HTMLIFrameElement | undefined) ??
+        (doc?.defaultView?.frameElement as HTMLIFrameElement | null);
+      if (!doc?.body || !iframe) return;
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node && words.length < 30000) {
+        const textNode = node as Text;
+        const parent = textNode.parentElement;
+        const hidden =
+          !parent ||
+          Boolean(parent.closest("script, style, noscript, svg, [aria-hidden='true']")) ||
+          parent.hidden;
+        if (!hidden && textNode.data.trim()) {
+          const matches = Array.from(
+            textNode.data.matchAll(/[\p{L}\p{N}]+(?:[’'\-][\p{L}\p{N}]+)*/gu)
+          );
+          matches.forEach((match, matchIndex) => {
+            const start = match.index ?? 0;
+            const text = match[0];
+            const end = start + text.length;
+            const nextStart = matches[matchIndex + 1]?.index ?? textNode.data.length;
+            const trailing = textNode.data.slice(end, nextStart);
+            const sentenceEnd = /[.!?][”"')\]]*\s*$/.test(`${text}${trailing}`);
+            const paragraphEnd =
+              matchIndex === matches.length - 1 &&
+              !textNode.nextSibling &&
+              Boolean(parent.closest("p, li, blockquote, pre"));
+            words.push({
+              text,
+              trailing,
+              node: textNode,
+              start,
+              end,
+              difficulty: estimateWordDifficulty(text),
+              rsvpPauseMultiplier: 1,
+              sentenceEnd,
+              paragraphEnd,
+              iframe
+            });
+          });
+        }
+        node = walker.nextNode();
+      }
+    });
+    const localFrequency = new Map<string, number>();
+    words.forEach((word) => {
+      const normalized = word.text.toLocaleLowerCase();
+      localFrequency.set(normalized, (localFrequency.get(normalized) ?? 0) + 1);
+    });
+    words.forEach((word) => {
+      word.rsvpPauseMultiplier = estimateRsvpPauseMultiplier(
+        word.text,
+        localFrequency.get(word.text.toLocaleLowerCase()) ?? 1
+      );
+    });
+    readerWordsRef.current = words;
+    manualReadingRef.current = null;
+    const nextIndex =
+      startAtViewport && words.length > 0 && readingModeRef.current !== "standard"
+        ? findNearestWordIndex()
+        : Math.min(activeWordIndexRef.current, Math.max(0, words.length - 1));
+    activeWordIndexRef.current = Math.min(Math.max(0, nextIndex), Math.max(0, words.length - 1));
+    if (readingModeRef.current !== "standard" && words.length > 0) {
+      setReadingWord(buildReadingWordState(activeWordIndexRef.current));
+    }
+  };
+
+  const scheduleReaderWordIndex = (startAtViewport = false, delay = 180) => {
+    if (wordIndexTimerRef.current) {
+      window.clearTimeout(wordIndexTimerRef.current);
+    }
+    wordIndexTimerRef.current = window.setTimeout(() => {
+      wordIndexTimerRef.current = null;
+      try {
+        prepareReaderWords(startAtViewport);
+      } catch {
+        readerWordsRef.current = [];
+      }
+    }, delay);
+  };
+
+  const saveObservedReading = (fromIndex: number, toIndex: number, elapsedMs: number, rereads = 0) => {
+    const words = readerWordsRef.current;
+    const count = Math.abs(toIndex - fromIndex);
+    if (count < 18 || elapsedMs < 5000 || words.length === 0) return;
+    const start = Math.min(fromIndex, toIndex);
+    const end = Math.min(words.length, Math.max(fromIndex, toIndex));
+    const sampleWords = words.slice(start, end);
+    const difficulty =
+      sampleWords.reduce((sum, word) => sum + word.difficulty, 0) / Math.max(1, sampleWords.length);
+    const next = recordSmartReadSample(smartProfileRef.current, {
+      words: count,
+      elapsedMs,
+      genres: book.genres,
+      timeBand: getReadingTimeBand(),
+      difficulty,
+      rereads
+    });
+    smartProfileRef.current = next;
+    saveSmartReadProfile(accountEmail, next);
+  };
+
+  const observeManualReadingPosition = () => {
+    if (Date.now() < programmaticScrollUntilRef.current || readerWordsRef.current.length === 0) {
+      return;
+    }
+    const now = Date.now();
+    const index = findNearestWordIndex();
+    const previous = manualReadingRef.current;
+    if (previous && now - previous.at >= 4500) {
+      if (index >= previous.index) {
+        saveObservedReading(previous.index, index, now - previous.at);
+      } else {
+        const session = smartSessionRef.current;
+        if (session) {
+          session.rereads += Math.max(1, Math.round((previous.index - index) / 80));
+          activeWordIndexRef.current = index;
+        }
+      }
+    }
+    if (readingModeRef.current !== "standard") {
+      activeWordIndexRef.current = index;
+      setReadingWord(buildReadingWordState(index));
+      if (readingModeRef.current === "smart") {
+        positionReaderDotAtWord(index);
+      }
+    }
+    manualReadingRef.current = { index, at: now };
+  };
+
   const updateLastReadMarker = (cfi: string) => {
-    if (!readerDotEnabled) {
+    if (!readerDotEnabledRef.current) {
       return;
     }
     const rendition = renditionRef.current;
@@ -690,21 +1023,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
   const ensureScrollSpacer = (container: HTMLElement) => {
     const existing = container.querySelector<HTMLElement>("#reader-scroll-spacer");
-    const heightPx = Math.max(120, Math.round(container.clientHeight * 0.5));
     if (existing) {
-      existing.style.height = `${heightPx}px`;
-      if (existing.parentElement === container && container.lastElementChild !== existing) {
-        container.appendChild(existing);
-      }
-      return;
+      existing.remove();
     }
-    const spacer = container.ownerDocument.createElement("div");
-    spacer.id = "reader-scroll-spacer";
-    spacer.setAttribute("aria-hidden", "true");
-    spacer.style.height = `${heightPx}px`;
-    spacer.style.width = "1px";
-    spacer.style.display = "block";
-    container.appendChild(spacer);
   };
 
   const ensureScrollContainer = () => {
@@ -726,7 +1047,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   };
 
   const scheduleReaderDotUpdate = () => {
-    if (!readerDotEnabled) {
+    if (!readerDotEnabledRef.current || readingModeRef.current !== "standard") {
       return;
     }
     if (readerDotTimerRef.current) {
@@ -765,6 +1086,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         JSON.stringify({
           fontSize: fontSizeRef.current,
           sidebarOpen: sidebarRef.current,
+          displayMode,
+          autoScrollSpeed,
+          speedReadWpm,
           cfi: override?.cfi ?? lastCfiRef.current ?? undefined,
           chapterPositions: override?.chapterPositions ?? chapterPositionsRef.current
         })
@@ -937,7 +1261,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           if (!doc) {
             return;
           }
-          const pad = sidebarOpen ? 28 : 16;
+          const pad = 24;
           doc.documentElement.style.setProperty("--reader-content-pad", `${pad}px`);
           if (!doc.getElementById("reader-font-scale")) {
             const style = doc.createElement("style");
@@ -953,6 +1277,28 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
               p { text-align: justify !important; text-justify: inter-word !important; hyphens: auto; text-indent: 0 !important; margin-left: 0 !important; margin-bottom: 1.6em !important; }
               p, div, section, article, blockquote, li { text-indent: 0 !important; margin-left: 0 !important; }
               h1, h2, h3, h4, h5, h6 { font-family: "ZT Nature", "Segoe UI", sans-serif !important; font-weight: 700 !important; letter-spacing: -0.01em; }
+              html[data-reader-finish="paper"] body { color: #30291f !important; }
+              html[data-reader-finish="paper"] p,
+              html[data-reader-finish="paper"] li,
+              html[data-reader-finish="paper"] blockquote,
+              html[data-reader-finish="paper"] td,
+              html[data-reader-finish="paper"] dd {
+                color: rgba(43, 36, 27, 0.96) !important;
+                text-shadow:
+                  0.18px 0 rgba(32, 25, 18, 0.42),
+                  -0.12px 0.16px rgba(82, 65, 43, 0.2);
+                filter: contrast(1.035);
+              }
+              html[data-reader-finish="paper"] h1,
+              html[data-reader-finish="paper"] h2,
+              html[data-reader-finish="paper"] h3,
+              html[data-reader-finish="paper"] h4,
+              html[data-reader-finish="paper"] h5,
+              html[data-reader-finish="paper"] h6 {
+                color: #2b3a2c !important;
+                text-shadow: 0.22px 0.18px rgba(45, 35, 24, 0.28);
+              }
+              html[data-reader-finish="paper"] ::selection { background: rgba(30, 111, 66, 0.25); }
             `;
             doc.head.appendChild(style);
           } else {
@@ -963,9 +1309,19 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           doc.body.style.overflow = "visible";
           doc.documentElement.style.overflowX = "hidden";
           doc.body.style.overflowX = "hidden";
-          const contentBg = readerTheme === "light" ? "#f1f0ea" : "#202227";
-          const contentTexture = readerTheme === "light" ? paperLightTexture : paperDarkTexture;
-          const texturedBackground = `linear-gradient(${contentBg}e8, ${contentBg}e8), url("${contentTexture}")`;
+          const currentDisplayMode = displayModeRef.current;
+          const currentReaderTheme = readerThemeRef.current;
+          const paperFinish = currentDisplayMode === "paper";
+          const contentBg = paperFinish
+            ? "#eee4ce"
+            : currentReaderTheme === "light"
+              ? "#f1f0ea"
+              : "#202227";
+          const contentTexture =
+            paperFinish || currentReaderTheme === "light" ? paperLightTexture : paperDarkTexture;
+          const textureOpacity = paperFinish ? "e0" : "e8";
+          const texturedBackground = `linear-gradient(${contentBg}${textureOpacity}, ${contentBg}${textureOpacity}), url("${contentTexture}")`;
+          doc.documentElement.dataset.readerFinish = currentDisplayMode;
           doc.documentElement.style.backgroundColor = contentBg;
           doc.body.style.backgroundColor = contentBg;
           doc.documentElement.style.backgroundImage = texturedBackground;
@@ -1104,7 +1460,15 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             wordBreak: "break-word"
           }
         });
-        rendition.themes.select(readerTheme === "light" ? "leaflet-light" : "leaflet-dark");
+        rendition.themes.select(
+          displayModeRef.current === "paper" || readerThemeRef.current === "light"
+            ? "leaflet-light"
+            : "leaflet-dark"
+        );
+        if (displayModeRef.current === "paper") {
+          rendition.themes.override("background", "#eee4ce");
+          rendition.themes.override("color", "#30291f");
+        }
         applyReaderTypography();
         applyReaderInsets();
         const initialFlow = "scrolled-doc";
@@ -1284,6 +1648,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           applyReaderTypography();
           ensureSingleScrollContainer();
           ensureScrollContainer();
+          scheduleReaderWordIndex(true);
         });
 
         if (lastCfiRef.current) {
@@ -1292,6 +1657,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           await rendition.display();
         }
         applyReaderInsets();
+        scheduleReaderWordIndex(true);
         setLoading(false);
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : "Failed to load book.");
@@ -1317,17 +1683,46 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     };
   }, [book.id, localPath]);
 
+  useEffect(() => {
+    if (loading) return;
+    const viewer = viewerRef.current;
+    const rendition = renditionRef.current;
+    if (!viewer || !rendition?.resize) return;
+
+    let frame = 0;
+    const syncViewport = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const width = Math.max(1, Math.round(viewer.clientWidth));
+        const height = Math.max(1, Math.round(viewer.clientHeight));
+        rendition.resize(width, height);
+        ensureSingleScrollContainer();
+      });
+    };
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(viewer);
+    syncViewport();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [book.id, loading]);
+
   // flip mode removed; scroll flow is initialized during load
 
   useEffect(() => {
+    displayModeRef.current = displayMode;
+    readerThemeRef.current = readerTheme;
     if (!renditionRef.current?.themes) {
       return;
     }
-    const themeName = readerTheme === "light" ? "leaflet-light" : "leaflet-dark";
+    const paperFinish = displayMode === "paper";
+    const themeName = paperFinish || readerTheme === "light" ? "leaflet-light" : "leaflet-dark";
     renditionRef.current.themes.select(themeName);
-    const themeBg = readerTheme === "light" ? "#f1f0ea" : "#202227";
-    const themeText = readerTheme === "light" ? "#16191e" : "#f7f9fc";
-    const themeTexture = readerTheme === "light" ? paperLightTexture : paperDarkTexture;
+    const themeBg = paperFinish ? "#eee4ce" : readerTheme === "light" ? "#f1f0ea" : "#202227";
+    const themeText = paperFinish ? "#30291f" : readerTheme === "light" ? "#16191e" : "#f7f9fc";
+    const themeTexture = paperFinish || readerTheme === "light" ? paperLightTexture : paperDarkTexture;
+    const textureOpacity = paperFinish ? "e0" : "e8";
     renditionRef.current.themes.override("background", themeBg);
     renditionRef.current.themes.override("color", themeText);
     const contentsList = renditionRef.current.getContents?.() ?? [];
@@ -1338,8 +1733,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       }
       doc.documentElement.style.backgroundColor = themeBg;
       doc.body.style.backgroundColor = themeBg;
-      doc.documentElement.style.backgroundImage = `linear-gradient(${themeBg}e8, ${themeBg}e8), url("${themeTexture}")`;
-      doc.body.style.backgroundImage = `linear-gradient(${themeBg}e8, ${themeBg}e8), url("${themeTexture}")`;
+      doc.documentElement.dataset.readerFinish = displayMode;
+      doc.documentElement.style.backgroundImage = `linear-gradient(${themeBg}${textureOpacity}, ${themeBg}${textureOpacity}), url("${themeTexture}")`;
+      doc.body.style.backgroundImage = `linear-gradient(${themeBg}${textureOpacity}, ${themeBg}${textureOpacity}), url("${themeTexture}")`;
       doc.documentElement.style.backgroundSize = "cover";
       doc.body.style.backgroundSize = "cover";
       doc.documentElement.style.color = themeText;
@@ -1349,7 +1745,8 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       ensureScrollContainer();
       scheduleReaderDotUpdate();
     }
-  }, [readerTheme]);
+    persistReaderState();
+  }, [readerTheme, displayMode]);
 
   useEffect(() => {
     let activeContainer: HTMLElement | null = null;
@@ -1367,6 +1764,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           triggerScrollAdvance();
         }
       }
+      window.setTimeout(observeManualReadingPosition, 360);
       scheduleReaderDotUpdate();
     };
 
@@ -1423,6 +1821,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       } else {
         ensureScrollSpacer(next);
       }
+      scheduleReaderWordIndex(true);
     };
 
     const initial = ensureScrollContainer();
@@ -1466,7 +1865,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       autoScrollLastTimeRef.current = time;
       const before = container.scrollTop;
       const normalized = Math.min(100, Math.max(0, autoScrollSpeed)) / 100;
-      const speedPxPerSecond = 16 + normalized * 220;
+      const speedPxPerSecond = 3 + normalized * 45;
       autoScrollCarryRef.current += speedPxPerSecond * deltaSeconds;
       const move = Math.floor(autoScrollCarryRef.current);
       if (move > 0) {
@@ -1490,6 +1889,160 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       autoScrollCarryRef.current = 0;
     };
   }, [autoScrollActive, autoScrollSpeed, book.id]);
+
+  const finishSmartSession = () => {
+    const session = smartSessionRef.current;
+    smartSessionRef.current = null;
+    if (!session) return;
+    const wordsRead = Math.max(0, session.furthestIndex - session.startIndex);
+    const averageDifficulty =
+      session.difficultyTotal / Math.max(1, session.difficultySamples);
+    const next = recordSmartReadSample(smartProfileRef.current, {
+      words: wordsRead,
+      elapsedMs: session.activeMs,
+      genres: book.genres,
+      timeBand: getReadingTimeBand(new Date(session.startedAt)),
+      difficulty: averageDifficulty || 1,
+      rereads: session.rereads
+    });
+    smartProfileRef.current = next;
+    saveSmartReadProfile(accountEmail, next);
+  };
+
+  useEffect(() => {
+    readingPausedRef.current = readingPaused;
+  }, [readingPaused]);
+
+  useEffect(() => {
+    speedReadWpmRef.current = speedReadWpm;
+    persistReaderState();
+  }, [speedReadWpm]);
+
+  useEffect(() => {
+    readingModeRef.current = readingMode;
+    setAutoScrollActive(false);
+    setReadingPaused(false);
+    readingPausedRef.current = false;
+    if (readingEngineTimerRef.current) {
+      window.clearTimeout(readingEngineTimerRef.current);
+      readingEngineTimerRef.current = null;
+    }
+    if (readingMode === "standard") {
+      finishSmartSession();
+      setReadingWord(null);
+      const cfi = renditionRef.current?.location?.end?.cfi ?? renditionRef.current?.location?.start?.cfi;
+      if (readerDotEnabled && cfi) updateLastReadMarker(cfi);
+      return;
+    }
+
+    prepareReaderWords(true);
+    activeWordIndexRef.current = findNearestWordIndex();
+    setReadingWord(buildReadingWordState(activeWordIndexRef.current));
+    if (readingMode === "smart") {
+      const now = Date.now();
+      smartSessionRef.current = {
+        startedAt: now,
+        activeMs: 0,
+        lastTickAt: now,
+        startIndex: activeWordIndexRef.current,
+        furthestIndex: activeWordIndexRef.current,
+        difficultyTotal: 0,
+        difficultySamples: 0,
+        rereads: 0
+      };
+    } else {
+      finishSmartSession();
+      removeLastReadMarker();
+    }
+
+    let stopped = false;
+    const schedule = (delay: number) => {
+      if (stopped) return;
+      readingEngineTimerRef.current = window.setTimeout(() => {
+        if (stopped || readingModeRef.current === "standard") return;
+        if (readingPausedRef.current) {
+          if (smartSessionRef.current) {
+            smartSessionRef.current.lastTickAt = Date.now();
+          }
+          schedule(180);
+          return;
+        }
+        const words = readerWordsRef.current;
+        if (words.length === 0) {
+          prepareReaderWords(true);
+          schedule(500);
+          return;
+        }
+        const index = Math.min(activeWordIndexRef.current, words.length - 1);
+        const word = words[index];
+        const now = Date.now();
+        const mode = readingModeRef.current;
+        let wpm = speedReadWpmRef.current;
+        if (mode === "smart") {
+          wpm = getAdaptiveWpm(
+            smartProfileRef.current,
+            book.genres,
+            getReadingTimeBand(),
+            word.difficulty
+          );
+          if (index % 8 === 0) setAdaptiveWpm(Math.round(wpm));
+          const session = smartSessionRef.current;
+          if (session) {
+            session.activeMs += Math.min(2500, Math.max(0, now - session.lastTickAt));
+            session.lastTickAt = now;
+            session.furthestIndex = Math.max(session.furthestIndex, index);
+            session.difficultyTotal += word.difficulty;
+            session.difficultySamples += 1;
+          }
+          positionReaderDotAtWord(index);
+        }
+        setReadingWord(buildReadingWordState(index));
+        scrollWordIntoReadingBand(index);
+
+        if (index >= words.length - 1) {
+          finishSmartSession();
+          goNextSection();
+          setReadingWord(null);
+          readingEngineTimerRef.current = window.setTimeout(() => {
+            prepareReaderWords(true);
+            activeWordIndexRef.current = findNearestWordIndex();
+            if (readingModeRef.current === "smart") {
+              const startedAt = Date.now();
+              smartSessionRef.current = {
+                startedAt,
+                activeMs: 0,
+                lastTickAt: startedAt,
+                startIndex: activeWordIndexRef.current,
+                furthestIndex: activeWordIndexRef.current,
+                difficultyTotal: 0,
+                difficultySamples: 0,
+                rereads: 0
+              };
+            }
+            schedule(mode === "smart" ? 2200 : 700);
+          }, 1100);
+          return;
+        }
+
+        activeWordIndexRef.current = index + 1;
+        const punctuationPause = word.paragraphEnd ? 620 : word.sentenceEnd ? 280 : /[,;:]$/.test(word.trailing.trim()) ? 120 : 0;
+        const paceDelay =
+          (60000 / Math.max(70, wpm)) *
+          (mode === "speed" ? word.rsvpPauseMultiplier : 1);
+        schedule(Math.round(paceDelay + punctuationPause));
+      }, delay);
+    };
+
+    schedule(readingMode === "smart" ? 2400 : 650);
+    return () => {
+      stopped = true;
+      if (readingEngineTimerRef.current) {
+        window.clearTimeout(readingEngineTimerRef.current);
+        readingEngineTimerRef.current = null;
+      }
+      if (readingMode === "smart") finishSmartSession();
+    };
+  }, [readingMode, book.id]);
 
   const getScrollContainer = (): HTMLElement | null => {
     const cached = scrollContainerRef.current;
@@ -1641,11 +2194,13 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
   useEffect(() => {
     try {
+      fontSizeRef.current = fontSize;
+      sidebarRef.current = sidebarOpen;
       persistReaderState();
     } catch {
       // ignore
     }
-  }, [fontSize, sidebarOpen, storageKey]);
+  }, [fontSize, sidebarOpen, displayMode, autoScrollSpeed, speedReadWpm, storageKey]);
 
   useEffect(() => {
     if (!renditionRef.current?.themes?.fontSize) {
@@ -1655,34 +2210,21 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     fontSizeRef.current = fontSize;
     applyReaderTypography();
     applyReaderInsets();
+    scheduleReaderWordIndex(true);
     persistReaderState();
   }, [fontSize]);
 
   useEffect(() => {
-    applyReaderInsets();
-    persistReaderState();
-    const contentsList = renditionRef.current?.getContents?.() ?? [];
-    const pad = sidebarOpen ? 28 : 16;
-    contentsList.forEach((contents: any) => {
-      const doc = contents?.document;
-      if (!doc) {
-        return;
-      }
-      doc.documentElement.style.setProperty("--reader-content-pad", `${pad}px`);
-    });
-    if (readerDotElementRef.current) {
-      readerDotElementRef.current.dataset.fixedLeft = "";
-    }
-  }, [sidebarOpen]);
-
-  useEffect(() => {
-    if (lastCfiRef.current) {
-      scheduleReaderDotUpdate();
-    }
-  }, [sidebarOpen]);
-
-  useEffect(() => {
+    readerDotEnabledRef.current = readerDotEnabled;
     if (!readerDotEnabled) {
+      removeLastReadMarker();
+      return;
+    }
+    if (readingModeRef.current === "smart") {
+      positionReaderDotAtWord(activeWordIndexRef.current);
+      return;
+    }
+    if (readingModeRef.current === "speed") {
       removeLastReadMarker();
       return;
     }
@@ -1693,14 +2235,6 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     }
     scheduleReaderDotUpdate();
   }, [readerDotEnabled]);
-
-  useEffect(() => {
-    fontSizeRef.current = fontSize;
-  }, [fontSize]);
-
-  useEffect(() => {
-    sidebarRef.current = sidebarOpen;
-  }, [sidebarOpen]);
 
   const resolvedCover = coverFallback ?? coverSrc;
   const handleCoverError = () => {
@@ -1715,6 +2249,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
     });
   };
   const isLight = readerTheme === "light";
+  const rsvpPivot = readingWord
+    ? Math.min(readingWord.text.length - 1, Math.max(0, Math.floor(readingWord.text.length * 0.36)))
+    : 0;
   const showFocusToast = (message: string) => {
     setFocusToast(message);
     if (focusToastTimerRef.current) {
@@ -1727,7 +2264,11 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
   return (
     <div
-      className={`reader-scope fixed inset-0 z-50 h-full w-full overflow-hidden reader-bg ${isLight ? "reader-light" : ""}`}
+      className={`reader-scope fixed inset-0 z-50 h-full w-full overflow-hidden reader-bg ${
+        isLight ? "reader-light" : ""
+      } ${displayMode === "paper" ? "reader-paper-finish" : ""} ${
+        readingMode === "speed" ? "reader-speed-active" : ""
+      }`}
     >
       <header className="reader-toolbar fixed left-0 right-0 top-0 z-50 flex w-full items-center justify-between px-6 py-5 md:px-8 transition-all duration-300">
         <div className="flex items-center gap-4">
@@ -1735,6 +2276,8 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             type="button"
             className="flex h-9 w-9 items-center justify-center rounded-lg border reader-border reader-icon transition reader-hover-accent"
             onClick={handleToggleSidebar}
+            onMouseEnter={openReaderSidebar}
+            onMouseLeave={scheduleReaderSidebarClose}
           >
             <span className="material-symbols-outlined">
               {sidebarOpen ? "dock_to_left" : "dock_to_right"}
@@ -1855,7 +2398,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             </button>
             {morePanelOpen && (
               <div
-                className="absolute right-0 mt-3 w-56 rounded-xl border p-4 text-xs shadow-2xl reader-panel reader-border"
+                className="absolute right-0 mt-3 w-72 rounded-xl border p-4 text-xs shadow-2xl reader-panel reader-border"
                 onMouseEnter={() => {
                   if (morePanelCloseRef.current) {
                     window.clearTimeout(morePanelCloseRef.current);
@@ -1872,6 +2415,29 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                 }}
               >
                 <div className="text-xs uppercase tracking-widest reader-muted">Reader</div>
+                <label className="mt-3 block">
+                  <span className="text-[10px] uppercase tracking-widest reader-muted">Page finish</span>
+                  <select
+                    className="reader-select mt-1.5 w-full"
+                    value={displayMode}
+                    onChange={(event) => setDisplayMode(event.target.value as ReaderDisplayMode)}
+                  >
+                    <option value="paper">Warm paper</option>
+                    <option value="app">Match app theme</option>
+                  </select>
+                </label>
+                <label className="mt-3 block">
+                  <span className="text-[10px] uppercase tracking-widest reader-muted">Reading mode</span>
+                  <select
+                    className="reader-select mt-1.5 w-full"
+                    value={readingMode}
+                    onChange={(event) => setReadingMode(event.target.value as ReadingMode)}
+                  >
+                    <option value="standard">Standard</option>
+                    <option value="smart">Smart Read</option>
+                    <option value="speed">SpeedRead (RSVP)</option>
+                  </select>
+                </label>
                 <button
                   type="button"
                   className="mt-3 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-xs uppercase tracking-widest transition reader-border reader-pill reader-icon"
@@ -1880,6 +2446,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                   <span>App theme</span>
                   <span className="reader-toggle" data-on={readerTheme === "light"} />
                 </button>
+                {readingMode === "standard" && (
                 <div className="mt-3 rounded-lg border px-3 py-2 reader-border reader-pill">
                   <div className="text-[10px] uppercase tracking-widest reader-muted">Auto scroll</div>
                   <div className="mt-2 flex items-center gap-2">
@@ -1901,10 +2468,66 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                       value={autoScrollSpeed}
                       onChange={(event) => setAutoScrollSpeed(Number(event.target.value))}
                       className="h-1 w-24 cursor-pointer accent-current"
-                      title={`Auto scroll speed ${autoScrollSpeed}`}
+                      title={`Auto scroll speed ${Math.round(3 + autoScrollSpeed * 0.45)} pixels per second`}
                     />
+                    <span className="ml-auto tabular-nums reader-muted">
+                      {Math.round(3 + autoScrollSpeed * 0.45)} px/s
+                    </span>
                   </div>
                 </div>
+                )}
+                {readingMode === "smart" && (
+                  <div className="mt-3 rounded-lg border px-3 py-3 reader-border reader-pill">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest reader-muted">Adaptive pace</div>
+                        <div className="mt-1 text-sm font-semibold reader-text-color">~{adaptiveWpm} WPM</div>
+                      </div>
+                      <button
+                        type="button"
+                        className="reader-mini-control"
+                        onClick={() => setReadingPaused((paused) => !paused)}
+                      >
+                        <span className="material-symbols-outlined text-base">
+                          {readingPaused ? "play_arrow" : "pause"}
+                        </span>
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[10px] leading-relaxed reader-muted">
+                      Learns from page timing, pauses, rereading, genre, time of day and word difficulty.
+                    </p>
+                  </div>
+                )}
+                {readingMode === "speed" && (
+                  <div className="mt-3 rounded-lg border px-3 py-3 reader-border reader-pill">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[10px] uppercase tracking-widest reader-muted">RSVP speed</div>
+                      <button
+                        type="button"
+                        className="reader-mini-control"
+                        onClick={() => setReadingPaused((paused) => !paused)}
+                      >
+                        <span className="material-symbols-outlined text-base">
+                          {readingPaused ? "play_arrow" : "pause"}
+                        </span>
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={120}
+                      max={1000}
+                      step={10}
+                      value={speedReadWpm}
+                      onChange={(event) => setSpeedReadWpm(Number(event.target.value))}
+                      className="mt-3 h-1 w-full cursor-pointer accent-current"
+                      title={`SpeedRead ${speedReadWpm} words per minute`}
+                    />
+                    <div className="mt-2 text-right text-[10px] tabular-nums reader-muted">{speedReadWpm} WPM</div>
+                    <p className="mt-2 text-[10px] leading-relaxed reader-muted">
+                      Timing automatically eases for uncommon, technical and unfamiliar words.
+                    </p>
+                  </div>
+                )}
                 <button
                   type="button"
                   className="mt-3 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-xs uppercase tracking-widest transition reader-border reader-pill reader-icon"
@@ -1919,19 +2542,30 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         </div>
       </header>
 
-      <div
-        className={`reader-shell flex h-full pt-24 md:pt-24 ${sidebarOpen ? "gap-2" : "gap-0"} ${
-          sidebarAnimating ? "reader-animating" : ""
-        }`}
-      >
+      <div className="reader-shell">
+        <div
+          className="reader-sidebar-hot-zone"
+          onMouseEnter={openReaderSidebar}
+          aria-hidden="true"
+        />
         <aside
-          className={`reader-sidebar leather-surface hidden min-w-0 flex-col border-r text-sm md:flex reader-border ${
+          aria-hidden={!sidebarOpen}
+          onMouseEnter={openReaderSidebar}
+          onMouseLeave={scheduleReaderSidebarClose}
+          onFocus={openReaderSidebar}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) {
+              scheduleReaderSidebarClose();
+            }
+          }}
+          className={`reader-sidebar leather-surface hidden w-72 flex-col border-r px-6 py-6 text-sm md:flex reader-border ${
             sidebarOpen
-              ? "reader-sidebar-open w-72 px-6 py-6 opacity-100"
-              : "reader-sidebar-closed w-0 overflow-hidden px-0 py-0 border-transparent opacity-0 pointer-events-none"
+              ? "reader-sidebar-open"
+              : "reader-sidebar-closed pointer-events-none"
           }`}
         >
-          <div className="mb-6">
+          <div className="mb-6 flex items-start justify-between gap-3">
+            <div>
             {resolvedCover && (
               <div className="book-cover-frame mb-4 h-44 w-32 overflow-hidden border reader-border">
                 <img src={resolvedCover} alt={book.title} className="h-full w-full object-cover" onError={handleCoverError} />
@@ -1941,6 +2575,15 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
             <p className="text-xs uppercase tracking-[0.2em] reader-muted">
               {book.author ?? "Unknown author"}
             </p>
+            </div>
+            <button
+              type="button"
+              className="reader-mini-control shrink-0"
+              onClick={() => setSidebarOpen(false)}
+              title="Close chapters"
+            >
+              <span className="material-symbols-outlined text-base">left_panel_close</span>
+            </button>
           </div>
           <div className="text-xs uppercase tracking-[0.3em] reader-muted">Chapters</div>
           <div className="mt-4 flex-1 overflow-y-auto pr-2">
@@ -1955,26 +2598,22 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
               <button
                 key={`${item.href}-${item.label}`}
                 type="button"
-                className={`mb-2 w-full rounded-lg px-3 py-2 text-left text-sm transition reader-icon reader-hover-bg reader-hover-accent ${
-                  active ? "font-semibold text-primary" : ""
+                className={`reader-chapter-link mb-2 w-full rounded-lg px-3 py-2 text-left text-sm transition reader-icon ${
+                  active ? "reader-chapter-active font-semibold" : ""
                 }`}
-                onClick={() => displayChapter(item.href)}
+                onClick={() => {
+                  displayChapter(item.href, { useSaved: false });
+                  setSidebarOpen(false);
+                }}
               >
-                <span className="relative inline-flex w-full flex-col gap-2">
-                  <span>{item.label}</span>
-                  <span
-                    className={`h-[2px] rounded-full bg-primary/80 transition-all duration-300 ease-out ${
-                      active ? "w-12 opacity-100" : "w-2 opacity-0"
-                    }`}
-                  />
-                </span>
+                <span>{item.label}</span>
               </button>
               );
             })}
           </div>
         </aside>
 
-        <main className="reader-main flex-1 overflow-hidden">
+        <main className="reader-main overflow-hidden">
           {loadError && (
             <div className="mx-auto mt-24 max-w-2xl rounded-xl border reader-border reader-panel p-6 text-center reader-muted">
               {loadError}
@@ -1982,7 +2621,6 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
           )}
           {!loadError && (
             <div className="reader-page-frame relative h-full overflow-hidden">
-              {sidebarAnimating && <div className="reader-transition-mask" />}
               {loading && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center text-sm reader-panel-soft reader-muted">
                   Loading book...
@@ -1992,12 +2630,36 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                 ref={viewerRef}
                 className="reader-container reader-scroll h-full w-full overflow-hidden overscroll-x-none"
               />
-              <div className="pointer-events-none absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center">
-                <div className="pointer-events-auto flex items-center gap-4 rounded-lg border px-3 py-2 text-xs uppercase tracking-widest reader-pill reader-border shadow-lg">
+              {readingMode === "speed" && readingWord && (
+                <div className="reader-speedread-overlay pointer-events-none absolute inset-0 z-20">
+                  <div className="reader-rsvp-word absolute left-1/2 top-[10%] -translate-x-1/2" aria-hidden="true">
+                    <span>{readingWord.text.slice(0, rsvpPivot)}</span>
+                    <span className="reader-rsvp-focus">{readingWord.text[rsvpPivot]}</span>
+                    <span>{readingWord.text.slice(rsvpPivot + 1)}</span>
+                  </div>
+                  <div
+                    key={readingWord.contextStart}
+                    className="reader-rsvp-context absolute bottom-20 left-1/2 w-[min(820px,76vw)] -translate-x-1/2"
+                  >
+                    {readingWord.context.map((word) => (
+                      <span
+                        key={`${word.index}-${word.text}`}
+                        className={word.index === readingWord.index ? "reader-rsvp-current" : ""}
+                      >
+                        {word.text}
+                        {word.trailing || " "}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="reader-chapter-dock pointer-events-none absolute bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center">
+                <div className="pointer-events-auto flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs uppercase tracking-widest reader-pill reader-border">
                   <button
                     type="button"
-                    className="rounded-md border px-3 py-1 transition reader-border reader-icon reader-hover-accent"
+                    className="reader-mini-control"
                     onClick={goPrevSection}
+                    title="Previous chapter"
                   >
                     <span className="material-symbols-outlined text-base">chevron_left</span>
                   </button>
@@ -2006,8 +2668,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                   </span>
                   <button
                     type="button"
-                    className="rounded-md border px-3 py-1 transition reader-border reader-icon reader-hover-accent"
+                    className="reader-mini-control"
                     onClick={goNextSection}
+                    title="Next chapter"
                   >
                     <span className="material-symbols-outlined text-base">chevron_right</span>
                   </button>
