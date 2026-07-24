@@ -56,7 +56,7 @@ export const Sidebar = ({ activeItem, onNavigate, onStartReading, startDisabled 
           disabled={startDisabled}
           title="Start reading"
         >
-          <UiIcon name="book-open" size={20} />
+          <UiIcon name="book-open" size={22} strokeWidth={2.1} />
           <span className="sidebar-copy font-bold">Start Reading</span>
         </button>
       </div>

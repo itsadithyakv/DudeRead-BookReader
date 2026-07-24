@@ -368,6 +368,9 @@ const App = () => {
   const nowReadingCover =
     nowReading?.coverUrl && nowReading.coverUrl.startsWith("http") ? nowReading.coverUrl : null;
   const nowBookmarked = nowReading ? bookmarks.includes(nowReading.id) : false;
+  const nowReadingProgress = Math.round(
+    Math.min(1, Math.max(0, nowReading?.progress ?? 0)) * 100
+  );
 
   useEffect(() => {
     setNowReadingFallback(null);
@@ -515,31 +518,46 @@ const App = () => {
       </div>
 
       {nowReading && (
-        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 hidden w-full max-w-2xl -translate-x-1/2 px-4 md:block">
-          <div className="now-reading-bar pointer-events-auto flex items-center gap-4 p-3">
-            <div className="book-cover-frame h-12 w-10 overflow-hidden">
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 hidden w-full max-w-xl -translate-x-1/2 px-4 md:block">
+          <div className="now-reading-bar pointer-events-auto">
+            <div className="now-reading-cover">
               {resolvedNowReadingCover ? (
                 <img
                   src={resolvedNowReadingCover}
-                  alt="Now reading"
+                  alt={`${nowReading.title} cover`}
                   className="h-full w-full object-cover"
                   onError={handleNowReadingError}
                 />
               ) : (
-                <div className="flex h-full w-full items-center justify-center bg-surface-container-high text-[10px] text-on-surface-variant">
-                  Cover
+                <div className="flex h-full w-full items-center justify-center bg-surface-container-high text-on-surface-variant">
+                  <UiIcon name="book-open" size={19} strokeWidth={1.7} />
                 </div>
               )}
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">
-                Currently Reading
+            <div className="now-reading-details">
+              <div className="flex items-center justify-between gap-3">
+                <h5 className="truncate font-headline text-base font-bold text-on-surface">
+                  {nowReading.title}
+                </h5>
+                <span className="now-reading-percent">{nowReadingProgress}%</span>
+              </div>
+              <p className="truncate text-xs text-on-surface-variant">
+                {nowReading.author ?? "Unknown author"}
               </p>
-              <h5 className="truncate text-sm font-headline font-bold">{nowReading.title}</h5>
+              <div
+                className="now-reading-progress"
+                role="progressbar"
+                aria-label={`${nowReading.title} reading progress`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={nowReadingProgress}
+              >
+                <span style={{ width: `${nowReadingProgress}%` }} />
+              </div>
             </div>
-            <div className="flex items-center gap-4 pr-2">
+            <div className="now-reading-actions">
               <button
-                className="key-button"
+                className="now-reading-action"
                 type="button"
                 onClick={() => nowReading && toggleBookmark(nowReading.id, nowReading.title)}
                 aria-label={nowBookmarked ? "Remove bookmark" : "Bookmark book"}
@@ -547,11 +565,12 @@ const App = () => {
                 <UiIcon name="bookmark" size={18} fill={nowBookmarked ? "currentColor" : "none"} />
               </button>
               <button
-                className="key-button tactile-button-primary"
+                className="now-reading-action now-reading-action-primary"
                 type="button"
                 onClick={() => handleOpenBook(nowReading)}
+                aria-label={`Continue reading ${nowReading.title}`}
               >
-                <UiIcon name="play" size={18} fill="currentColor" />
+                <UiIcon name="play" size={17} fill="currentColor" />
               </button>
             </div>
           </div>

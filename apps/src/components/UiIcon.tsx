@@ -1,6 +1,7 @@
 import {
   BookCopy,
   BookOpenText,
+  BookPlus,
   Bookmark,
   ChartNoAxesCombined,
   Cloud,
@@ -21,6 +22,7 @@ import {
 
 export type UiIconName =
   | "analytics"
+  | "book-add"
   | "book-open"
   | "bookmark"
   | "cloud"
@@ -44,6 +46,7 @@ type UiIconProps = Omit<LucideProps, "ref"> & {
 
 const icons: Record<UiIconName, LucideIcon> = {
   analytics: ChartNoAxesCombined,
+  "book-add": BookPlus,
   "book-open": BookOpenText,
   bookmark: Bookmark,
   cloud: Cloud,

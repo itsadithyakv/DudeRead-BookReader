@@ -421,11 +421,13 @@ export const LibraryPage = ({ onOpenBook, onNavigate, showToast }: LibraryPagePr
         >
           {importing && (
             <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-surface-container-lowest/90">
-              <div className="h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              <div className="import-book-icon import-book-icon-loading" aria-hidden="true">
+                <UiIcon name="book-add" size={29} strokeWidth={1.8} />
+              </div>
             </div>
           )}
-          <div className="paper-surface-raised mb-4 flex h-16 w-16 items-center justify-center text-primary transition-transform hover:-translate-y-1">
-            <UiIcon name="upload" size={28} />
+          <div className="import-book-icon mb-5" aria-hidden="true">
+            <UiIcon name="book-add" size={30} strokeWidth={1.8} />
           </div>
           <h3 className="page-title text-2xl">Import Books</h3>
           <p className="mt-2 max-w-xs text-center text-sm text-on-surface-variant">
