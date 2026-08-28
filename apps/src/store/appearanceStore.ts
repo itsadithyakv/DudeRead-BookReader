@@ -23,6 +23,13 @@ const readPreference = (): ThemeMode | null => {
   }
 };
 
+const systemThemeQuery = () =>
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+const readSystemTheme = (): ThemeMode => (systemThemeQuery()?.matches === false ? "light" : "dark");
+
 const applyTheme = (theme: ThemeMode) => {
   if (typeof document === "undefined") return;
   document.documentElement.dataset.theme = theme;
@@ -33,7 +40,7 @@ const applyTheme = (theme: ThemeMode) => {
 };
 
 const savedTheme = readPreference();
-const initialTheme = savedTheme ?? "dark";
+const initialTheme = savedTheme ?? readSystemTheme();
 applyTheme(initialTheme);
 
 export const useAppearanceStore = create<AppearanceState>((set, get) => ({
@@ -49,12 +56,25 @@ export const useAppearanceStore = create<AppearanceState>((set, get) => ({
   },
   resetTheme() {
     localStorage.removeItem(STORAGE_KEY);
-    const theme: ThemeMode = "dark";
+    const theme = readSystemTheme();
     applyTheme(theme);
     set({ theme, hasUserPreference: false });
   }
 }));
 
 export const watchSystemTheme = () => {
-  return () => undefined;
+  const query = systemThemeQuery();
+  if (!query) {
+    return () => undefined;
+  }
+  const onChange = () => {
+    if (useAppearanceStore.getState().hasUserPreference) {
+      return;
+    }
+    const theme = readSystemTheme();
+    applyTheme(theme);
+    useAppearanceStore.setState({ theme });
+  };
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
 };

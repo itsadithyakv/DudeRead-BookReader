@@ -329,6 +329,27 @@ pub fn resolve_readable_path(source: &Path, hash: &str) -> Result<PathBuf> {
   Ok(source.to_path_buf())
 }
 
+/// Recognises the container formats a cover can plausibly arrive in. Used to
+/// reject error pages, which otherwise get cached as a permanent "cover".
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    return Some("image/jpeg");
+  }
+  if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+    return Some("image/png");
+  }
+  if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    return Some("image/gif");
+  }
+  if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+    return Some("image/webp");
+  }
+  if bytes.starts_with(b"BM") {
+    return Some("image/bmp");
+  }
+  None
+}
+
 pub async fn store_cover(url: &str, hash: &str) -> Result<PathBuf> {
   let dir = covers_dir()?;
   fs::create_dir_all(&dir)?;
@@ -336,8 +357,22 @@ pub async fn store_cover(url: &str, hash: &str) -> Result<PathBuf> {
   if dest.exists() {
     return Ok(dest);
   }
-  let bytes = reqwest::get(url).await?.bytes().await?;
-  fs::write(&dest, bytes)?;
+
+  // Without these checks a 404 page or a redirect to HTML was written to disk and
+  // cached forever, permanently blocking the real cover for that book.
+  let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
+  if sniff_image_mime(&bytes).is_none() {
+    return Err(anyhow::anyhow!("cover response was not an image"));
+  }
+
+  // Write via a temp file so an interrupted download cannot leave a truncated
+  // cover behind that the `dest.exists()` short-circuit would then trust.
+  let staging = dir.join(format!("{}-cover.part", hash));
+  fs::write(&staging, &bytes)?;
+  if let Err(error) = fs::rename(&staging, &dest) {
+    let _ = fs::remove_file(&staging);
+    return Err(error.into());
+  }
   Ok(dest)
 }
 

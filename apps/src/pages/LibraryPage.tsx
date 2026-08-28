@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { BookGrid } from "../components/BookGrid";
 import { BookList } from "../components/BookList";
-import { useLibraryStore } from "../store/libraryStore";
+import { isMetadataRetryDue, useLibraryStore } from "../store/libraryStore";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import type { Book, BookFilter } from "@shared/models/book";
 import { IMPORTABLE_EXTENSIONS, formatDisplayList } from "../constants/bookFormats";
@@ -58,9 +59,33 @@ const resolveErrorMessage = (error: unknown, fallback: string) => {
 
 export const LibraryPage = ({ onOpenBook, onNavigate, showToast }: LibraryPageProps) => {
   const { books, filters, loading, importing, stats, importBooks, importPaths, refreshMetadata, fetchCover, setFilter } =
-    useLibraryStore();
+    useLibraryStore(
+      useShallow((state) => ({
+        books: state.books,
+        filters: state.filters,
+        loading: state.loading,
+        importing: state.importing,
+        stats: state.stats,
+        importBooks: state.importBooks,
+        importPaths: state.importPaths,
+        refreshMetadata: state.refreshMetadata,
+        fetchCover: state.fetchCover,
+        setFilter: state.setFilter
+      }))
+    );
   const { activeSession, startSession, stopSession, clearSessionShelf, focusSettings, addSessionNote, goal, daily } =
-    useHabitStore();
+    useHabitStore(
+      useShallow((state) => ({
+        activeSession: state.activeSession,
+        startSession: state.startSession,
+        stopSession: state.stopSession,
+        clearSessionShelf: state.clearSessionShelf,
+        focusSettings: state.focusSettings,
+        addSessionNote: state.addSessionNote,
+        goal: state.goal,
+        daily: state.daily
+      }))
+    );
   const [sessionDuration, setSessionDuration] = useState(20);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
@@ -233,7 +258,11 @@ export const LibraryPage = ({ onOpenBook, onNavigate, showToast }: LibraryPagePr
   const requestedCovers = useRef(new Set<string>());
 
   useEffect(() => {
-    const missing = books.filter((book) => !book.coverUrl && !requestedCovers.current.has(book.id));
+    const now = Date.now();
+    const missing = books.filter(
+      (book) =>
+        !book.coverUrl && !requestedCovers.current.has(book.id) && isMetadataRetryDue(book, now)
+    );
     missing.slice(0, 3).forEach((book) => {
       requestedCovers.current.add(book.id);
       fetchCover(book.id).catch(() => {

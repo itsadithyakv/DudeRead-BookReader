@@ -28,7 +28,7 @@ type LibraryState = {
   loadStats: () => Promise<void>;
   loadDriveStatus: () => Promise<void>;
   importBooks: () => Promise<void>;
-  importPaths: (paths: string[]) => Promise<void>;
+  importPaths: (paths: string[]) => Promise<Book[]>;
   refreshMetadata: (id: string) => Promise<void>;
   fetchCover: (id: string) => Promise<void>;
   openBook: (book: Book) => Promise<void>;
@@ -41,6 +41,21 @@ type LibraryState = {
 };
 
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Some books simply have no match upstream. Without a cooldown the library
+// re-ran those lookups on every launch, forever.
+const METADATA_RETRY_COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000;
+
+export const isMetadataRetryDue = (book: Book, now = Date.now()) => {
+  if (!book.metadataCheckedAt) {
+    return true;
+  }
+  const checkedAt = Date.parse(book.metadataCheckedAt);
+  if (!Number.isFinite(checkedAt)) {
+    return true;
+  }
+  return now - checkedAt >= METADATA_RETRY_COOLDOWN_MS;
+};
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   books: [],
@@ -107,21 +122,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     try {
       const imported = await bookService.importPaths(paths);
       if (imported.length === 0) {
-        return;
+        return [];
       }
       const books = mergeBooks(get().books, imported);
       set({ books });
       scheduleSync(set, get);
       void get().refreshMissingMetadata(imported);
+      return imported;
     } finally {
       set({ importing: false });
     }
   },
   async refreshMetadata(id: string) {
     const updated = await bookService.refreshMetadata(id);
-    set({
-      books: get().books.map((book) => (book.id === updated.id ? updated : book))
-    });
+    set({ books: replaceBook(get().books, updated) });
     scheduleSync(set, get);
   },
   async fetchCover(id: string) {
@@ -129,9 +143,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (!updated) {
       return;
     }
-    set({
-      books: get().books.map((book) => (book.id === updated.id ? updated : book))
-    });
+    set({ books: replaceBook(get().books, updated) });
   },
   async openBook(book: Book) {
     const now = new Date().toISOString();
@@ -164,7 +176,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
   async refreshMissingMetadata(seed) {
     const all = seed ?? get().books;
+    const now = Date.now();
     const needsRefresh = all.filter((book) => {
+      if (!isMetadataRetryDue(book, now)) {
+        return false;
+      }
       const missingAuthor = !book.author || book.author.trim().length === 0;
       const missingCover = !book.coverUrl;
       const missingGenres = !book.genres || book.genres.length === 0;
@@ -177,17 +193,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ metadataRefreshing: true, metadataTotal: needsRefresh.length, metadataDone: 0 });
     let done = 0;
     for (const book of needsRefresh) {
+      let updated: Book | null = null;
       try {
-        const updated = await bookService.refreshMetadata(book.id);
-        set({
-          books: get().books.map((existing) => (existing.id === updated.id ? updated : existing))
-        });
+        updated = await bookService.refreshMetadata(book.id);
       } catch {
         // ignore refresh errors
-      } finally {
-        done += 1;
-        set({ metadataDone: done });
       }
+      done += 1;
+      // One store write per book, not two — every write re-renders the library.
+      set({
+        metadataDone: done,
+        books: updated
+          ? replaceBook(get().books, updated)
+          : get().books
+      });
     }
     set({ metadataRefreshing: false });
   },
@@ -218,6 +237,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     });
   }
 }));
+
+function replaceBook(books: Book[], updated: Book) {
+  const index = books.findIndex((book) => book.id === updated.id);
+  if (index === -1) {
+    return books;
+  }
+  const next = books.slice();
+  next[index] = updated;
+  return next;
+}
 
 function mergeBooks(existing: Book[], imported: Book[]) {
   const byId = new Map(existing.map((book) => [book.id, book]));

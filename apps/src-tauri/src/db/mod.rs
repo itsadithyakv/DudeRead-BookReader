@@ -17,7 +17,11 @@ pub struct BookRecord {
   pub file_hash: String,
   pub progress: f32,
   pub last_opened: Option<String>,
-  pub created_at: String
+  pub created_at: String,
+  /// When metadata enrichment last ran for this book, successful or not. Used to
+  /// stop the library re-querying the same upstream lookups on every launch.
+  #[serde(default)]
+  pub metadata_checked_at: Option<String>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,66 +55,34 @@ impl Database {
   }
 
   fn init_schema(&self) -> Result<()> {
-    self.conn.execute_batch(
-      "CREATE TABLE IF NOT EXISTS books (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        author TEXT,
-        genres TEXT,
-        cover_url TEXT,
-        local_path TEXT NOT NULL,
-        file_hash TEXT NOT NULL,
-        progress REAL DEFAULT 0,
-        last_opened TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS collections (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS book_collections (
-        book_id TEXT NOT NULL,
-        collection_id TEXT NOT NULL,
-        PRIMARY KEY (book_id, collection_id)
-      );
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      );
-      CREATE TABLE IF NOT EXISTS reading_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        book_id TEXT NOT NULL,
-        opened_at TEXT NOT NULL,
-        date_key TEXT NOT NULL,
-        UNIQUE(book_id, date_key)
-      );
-      CREATE INDEX IF NOT EXISTS reading_sessions_date_idx ON reading_sessions (date_key);"
-    )?;
-    Ok(())
+    apply_schema(&self.conn)
+  }
+
+  fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookRecord> {
+    let genres_json: Option<String> = row.get(3)?;
+    let genres = genres_json
+      .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+      .unwrap_or_default();
+    Ok(BookRecord {
+      id: row.get(0)?,
+      title: row.get(1)?,
+      author: row.get(2)?,
+      genres,
+      cover_url: row.get(4)?,
+      local_path: row.get(5)?,
+      file_hash: row.get(6)?,
+      progress: row.get(7)?,
+      last_opened: row.get(8)?,
+      created_at: row.get(9)?,
+      metadata_checked_at: row.get(10)?
+    })
   }
 
   pub fn list_books(&self) -> Result<Vec<BookRecord>> {
     let mut stmt = self.conn.prepare(
-      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at FROM books"
+      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at, metadata_checked_at FROM books"
     )?;
-    let rows = stmt.query_map([], |row| {
-      let genres_json: Option<String> = row.get(3)?;
-      let genres = genres_json
-        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-        .unwrap_or_default();
-      Ok(BookRecord {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        author: row.get(2)?,
-        genres,
-        cover_url: row.get(4)?,
-        local_path: row.get(5)?,
-        file_hash: row.get(6)?,
-        progress: row.get(7)?,
-        last_opened: row.get(8)?,
-        created_at: row.get(9)?
-      })
-    })?;
+    let rows = stmt.query_map([], Self::row_to_book)?;
 
     let mut books = Vec::new();
     for row in rows {
@@ -121,52 +93,22 @@ impl Database {
 
   pub fn find_by_id(&self, id: &str) -> Result<Option<BookRecord>> {
     let mut stmt = self.conn.prepare(
-      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at FROM books WHERE id = ?1"
+      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at, metadata_checked_at FROM books WHERE id = ?1"
     )?;
     let mut rows = stmt.query(params![id])?;
     if let Some(row) = rows.next()? {
-      let genres_json: Option<String> = row.get(3)?;
-      let genres = genres_json
-        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-        .unwrap_or_default();
-      return Ok(Some(BookRecord {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        author: row.get(2)?,
-        genres,
-        cover_url: row.get(4)?,
-        local_path: row.get(5)?,
-        file_hash: row.get(6)?,
-        progress: row.get(7)?,
-        last_opened: row.get(8)?,
-        created_at: row.get(9)?
-      }));
+      return Ok(Some(Self::row_to_book(row)?));
     }
     Ok(None)
   }
 
   pub fn find_by_hash(&self, hash: &str) -> Result<Option<BookRecord>> {
     let mut stmt = self.conn.prepare(
-      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at FROM books WHERE file_hash = ?1"
+      "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at, metadata_checked_at FROM books WHERE file_hash = ?1"
     )?;
     let mut rows = stmt.query(params![hash])?;
     if let Some(row) = rows.next()? {
-      let genres_json: Option<String> = row.get(3)?;
-      let genres = genres_json
-        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-        .unwrap_or_default();
-      return Ok(Some(BookRecord {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        author: row.get(2)?,
-        genres,
-        cover_url: row.get(4)?,
-        local_path: row.get(5)?,
-        file_hash: row.get(6)?,
-        progress: row.get(7)?,
-        last_opened: row.get(8)?,
-        created_at: row.get(9)?
-      }));
+      return Ok(Some(Self::row_to_book(row)?));
     }
     Ok(None)
   }
@@ -205,8 +147,15 @@ impl Database {
   pub fn update_metadata(&self, book: &BookRecord) -> Result<()> {
     let genres_json = serde_json::to_string(&book.genres).ok();
     self.conn.execute(
-      "UPDATE books SET title = ?1, author = ?2, genres = ?3, cover_url = ?4 WHERE id = ?5",
-      params![book.title, book.author, genres_json, book.cover_url, book.id]
+      "UPDATE books SET title = ?1, author = ?2, genres = ?3, cover_url = ?4, metadata_checked_at = ?5 WHERE id = ?6",
+      params![
+        book.title,
+        book.author,
+        genres_json,
+        book.cover_url,
+        book.metadata_checked_at,
+        book.id
+      ]
     )?;
     Ok(())
   }
@@ -318,6 +267,50 @@ impl Database {
   }
 }
 
+fn apply_schema(conn: &Connection) -> Result<()> {
+  conn.execute_batch(
+    "CREATE TABLE IF NOT EXISTS books (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        author TEXT,
+        genres TEXT,
+        cover_url TEXT,
+        local_path TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        progress REAL DEFAULT 0,
+        last_opened TEXT,
+        created_at TEXT NOT NULL,
+        metadata_checked_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS collections (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS book_collections (
+        book_id TEXT NOT NULL,
+        collection_id TEXT NOT NULL,
+        PRIMARY KEY (book_id, collection_id)
+      );
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+      CREATE TABLE IF NOT EXISTS reading_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        opened_at TEXT NOT NULL,
+        date_key TEXT NOT NULL,
+        UNIQUE(book_id, date_key)
+      );
+      CREATE INDEX IF NOT EXISTS reading_sessions_date_idx ON reading_sessions (date_key);
+      CREATE INDEX IF NOT EXISTS books_file_hash_idx ON books (file_hash);"
+  )?;
+  // Fails harmlessly when the column is already present, which is the point:
+  // existing libraries gain it once, new ones already have it.
+  let _ = conn.execute("ALTER TABLE books ADD COLUMN metadata_checked_at TEXT", []);
+  Ok(())
+}
+
 fn db_path() -> Result<PathBuf> {
   let base = dirs::data_dir().ok_or_else(|| anyhow::anyhow!("missing app data dir"))?;
   Ok(base.join("leaflet").join("library.db"))
@@ -325,4 +318,116 @@ fn db_path() -> Result<PathBuf> {
 
 pub fn now_iso() -> String {
   DateTime::<Utc>::from(Utc::now()).to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+      .prepare(&format!("PRAGMA table_info({table})"))
+      .expect("pragma");
+    let names = stmt
+      .query_map([], |row| row.get::<_, String>(1))
+      .expect("query")
+      .map(|value| value.expect("column name"))
+      .collect();
+    names
+  }
+
+  /// The shape of `books` as shipped before metadata_checked_at existed.
+  fn legacy_schema(conn: &Connection) {
+    conn
+      .execute_batch(
+        "CREATE TABLE books (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          author TEXT,
+          genres TEXT,
+          cover_url TEXT,
+          local_path TEXT NOT NULL,
+          file_hash TEXT NOT NULL,
+          progress REAL DEFAULT 0,
+          last_opened TEXT,
+          created_at TEXT NOT NULL
+        );"
+      )
+      .expect("legacy schema");
+  }
+
+  #[test]
+  fn migrates_an_existing_library_without_losing_rows() {
+    let conn = Connection::open_in_memory().expect("open");
+    legacy_schema(&conn);
+    conn
+      .execute(
+        "INSERT INTO books (id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at)
+         VALUES ('h1', 'Old Book', 'Someone', '[]', NULL, '/books/h1.epub', 'h1', 0.5, NULL, '2026-01-01T00:00:00Z')",
+        []
+      )
+      .expect("seed row");
+
+    apply_schema(&conn).expect("migrate");
+
+    assert!(column_names(&conn, "books").contains(&"metadata_checked_at".to_string()));
+
+    let mut stmt = conn
+      .prepare(
+        "SELECT id, title, author, genres, cover_url, local_path, file_hash, progress, last_opened, created_at, metadata_checked_at FROM books"
+      )
+      .expect("prepare");
+    let books: Vec<BookRecord> = stmt
+      .query_map([], Database::row_to_book)
+      .expect("query")
+      .map(|row| row.expect("row"))
+      .collect();
+
+    assert_eq!(books.len(), 1, "the existing row must survive the migration");
+    assert_eq!(books[0].title, "Old Book");
+    assert_eq!(books[0].progress, 0.5);
+    assert_eq!(
+      books[0].metadata_checked_at, None,
+      "migrated books start unchecked so enrichment runs once"
+    );
+  }
+
+  #[test]
+  fn applying_the_schema_twice_is_a_no_op() {
+    let conn = Connection::open_in_memory().expect("open");
+    apply_schema(&conn).expect("first");
+    apply_schema(&conn).expect("second");
+
+    let columns = column_names(&conn, "books");
+    assert_eq!(
+      columns.iter().filter(|name| *name == "metadata_checked_at").count(),
+      1
+    );
+  }
+
+  #[test]
+  fn a_fresh_database_already_has_the_column() {
+    let conn = Connection::open_in_memory().expect("open");
+    apply_schema(&conn).expect("schema");
+    assert!(column_names(&conn, "books").contains(&"metadata_checked_at".to_string()));
+  }
+
+  /// Drive manifests written before this field existed must still deserialize.
+  #[test]
+  fn legacy_sync_payloads_deserialize() {
+    let json = r#"{
+      "id": "h1",
+      "title": "Old Book",
+      "author": null,
+      "genres": [],
+      "coverUrl": null,
+      "localPath": "/books/h1.epub",
+      "fileHash": "h1",
+      "progress": 0.25,
+      "lastOpened": null,
+      "createdAt": "2026-01-01T00:00:00Z"
+    }"#;
+    let book: BookRecord = serde_json::from_str(json).expect("legacy payload");
+    assert_eq!(book.metadata_checked_at, None);
+  }
 }

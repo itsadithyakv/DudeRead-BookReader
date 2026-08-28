@@ -208,6 +208,7 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const autoScrollLastTimeRef = useRef<number | null>(null);
   const autoScrollCarryRef = useRef(0);
   const readerDotTimerRef = useRef<number | null>(null);
+  const readerDotRetryTimerRef = useRef<number | null>(null);
   const wordIndexTimerRef = useRef<number | null>(null);
   const sidebarOpenTimerRef = useRef<number | null>(null);
   const sidebarCloseTimerRef = useRef<number | null>(null);
@@ -515,6 +516,13 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const readerTheme = useAppearanceStore((state) => state.theme);
   const displayModeRef = useRef<ReaderDisplayMode>(displayMode);
   const readerThemeRef = useRef(readerTheme);
+  const autoScrollSpeedRef = useRef(autoScrollSpeed);
+  // Keep the mirrors current during render so long-lived callbacks created inside
+  // the load effect (relocation handler, epub content hook) never read stale prefs.
+  displayModeRef.current = displayMode;
+  readerThemeRef.current = readerTheme;
+  autoScrollSpeedRef.current = autoScrollSpeed;
+  speedReadWpmRef.current = speedReadWpm;
   const toggleTheme = useAppearanceStore((state) => state.toggleTheme);
   const accountEmail = useAccountStore((state) => state.email);
   const smartProfileRef = useRef<SmartReadProfile>(loadSmartReadProfile(accountEmail));
@@ -1391,7 +1399,11 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
 
     if (!found && readerDotRetryRef.current.count < 3) {
       readerDotRetryRef.current.count += 1;
-      window.setTimeout(() => {
+      if (readerDotRetryTimerRef.current) {
+        window.clearTimeout(readerDotRetryTimerRef.current);
+      }
+      readerDotRetryTimerRef.current = window.setTimeout(() => {
+        readerDotRetryTimerRef.current = null;
         updateLastReadMarker(cfi);
       }, 260);
     }
@@ -1400,6 +1412,10 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   const removeLastReadMarker = () => {
     if (readerDotTimerRef.current) {
       window.clearTimeout(readerDotTimerRef.current);
+    }
+    if (readerDotRetryTimerRef.current) {
+      window.clearTimeout(readerDotRetryTimerRef.current);
+      readerDotRetryTimerRef.current = null;
     }
     if (readerDotOffscreenTimerRef.current) {
       window.clearTimeout(readerDotOffscreenTimerRef.current);
@@ -1448,20 +1464,18 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
   };
 
   const ensureScrollContainer = () => {
-        const container = getScrollContainer();
-        if (!container) {
-          return null;
-        }
-        scrollContainerRef.current = container;
-        ensureScrollSpacer(container);
+    const container = getScrollContainer();
+    if (!container) {
+      return null;
+    }
+    scrollContainerRef.current = container;
+    ensureScrollSpacer(container);
     if (readerDotElementRef.current && !container.contains(readerDotElementRef.current)) {
       readerDotElementRef.current.remove();
       readerDotElementRef.current = null;
     }
-    if (readerDotElementRef.current) {
-      readerDotElementRef.current.style.left = "8px";
-      readerDotElementRef.current.dataset.fixedLeft = "";
-    }
+    // The dot's horizontal position is owned by positionReaderDotAtWord /
+    // updateLastReadMarker; resetting it here made it snap on every scroll tick.
     return container;
   };
 
@@ -1505,9 +1519,9 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
         JSON.stringify({
           fontSize: fontSizeRef.current,
           sidebarOpen: sidebarRef.current,
-          displayMode,
-          autoScrollSpeed,
-          speedReadWpm,
+          displayMode: displayModeRef.current,
+          autoScrollSpeed: autoScrollSpeedRef.current,
+          speedReadWpm: speedReadWpmRef.current,
           cfi: override?.cfi ?? lastCfiRef.current ?? undefined,
           chapterPositions: override?.chapterPositions ?? chapterPositionsRef.current
         })
@@ -2074,19 +2088,10 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
                 [href]: location.start.cfi
               };
             }
-            try {
-              localStorage.setItem(
-                storageKey,
-                JSON.stringify({
-                  fontSize: fontSizeRef.current,
-                  sidebarOpen: sidebarRef.current,
-                  cfi: location.start.cfi,
-                  chapterPositions: chapterPositionsRef.current
-                })
-              );
-            } catch {
-              // ignore storage errors
-            }
+            persistReaderState({
+              cfi: location.start.cfi,
+              chapterPositions: chapterPositionsRef.current
+            });
           }
 
           // no auto-advance in scroll mode
@@ -2320,17 +2325,24 @@ export const ReaderView = ({ book, onClose }: ReaderViewProps) => {
       scheduleReaderWordIndex(true);
     };
 
+    // The rendition is created asynchronously by the load effect, so this must wait
+    // for `loading` to clear — otherwise no scroll/wheel listener is ever attached.
+    const rendition = renditionRef.current;
+    if (loading || !rendition) {
+      return;
+    }
+
     const initial = ensureScrollContainer();
     if (initial) {
       attach(initial);
     }
-    renditionRef.current?.on?.("rendered", onRendered);
+    rendition.on?.("rendered", onRendered);
 
     return () => {
-      renditionRef.current?.off?.("rendered", onRendered);
+      rendition.off?.("rendered", onRendered);
       detach();
     };
-  }, [book.id]);
+  }, [book.id, loading]);
 
   useEffect(() => {
     if (!autoScrollActive) {

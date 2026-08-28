@@ -103,40 +103,51 @@ const hashSeed = (value: string) => {
   return Math.abs(hash);
 };
 
-const buildCombos = () => {
-  const combos: ShelfStyle[] = [];
-  for (const accent of shelfAccents) {
-    for (const icon of shelfIcons) {
-      for (const spike of shelfSpikes) {
-        for (const stickerShape of stickerShapes) {
-          for (const stripeCount of stripeCounts) {
-            for (const cornerStyle of cornerStyles) {
-              for (const foil of foilTypes) {
-                combos.push({
-                  accent,
-                  icon,
-                  spike,
-                  stickerShape,
-                  stripeCount,
-                  cornerStyle,
-                  foil,
-                  wear: 0.3,
-                  showSticker: true,
-                  showStripes: true,
-                  showFoil: foil !== "none",
-                  showWear: true
-                });
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  return combos;
-};
+// The combination space is 27,648 styles. Materialising it eagerly cost a large
+// allocation on every app start, so it is addressed positionally instead: each
+// index decodes to exactly the combo the old nested loops produced at that slot.
+const COMBO_DIMENSIONS = [
+  foilTypes.length,
+  cornerStyles.length,
+  stripeCounts.length,
+  stickerShapes.length,
+  shelfSpikes.length,
+  shelfIcons.length,
+  shelfAccents.length
+] as const;
 
-const shelfCombos = buildCombos();
+const SHELF_COMBO_COUNT = COMBO_DIMENSIONS.reduce((total, size) => total * size, 1);
+
+const shelfComboAt = (index: number): ShelfStyle => {
+  let rest = ((index % SHELF_COMBO_COUNT) + SHELF_COMBO_COUNT) % SHELF_COMBO_COUNT;
+  const foil = foilTypes[rest % foilTypes.length];
+  rest = Math.floor(rest / foilTypes.length);
+  const cornerStyle = cornerStyles[rest % cornerStyles.length];
+  rest = Math.floor(rest / cornerStyles.length);
+  const stripeCount = stripeCounts[rest % stripeCounts.length];
+  rest = Math.floor(rest / stripeCounts.length);
+  const stickerShape = stickerShapes[rest % stickerShapes.length];
+  rest = Math.floor(rest / stickerShapes.length);
+  const spike = shelfSpikes[rest % shelfSpikes.length];
+  rest = Math.floor(rest / shelfSpikes.length);
+  const icon = shelfIcons[rest % shelfIcons.length];
+  rest = Math.floor(rest / shelfIcons.length);
+  const accent = shelfAccents[rest % shelfAccents.length];
+  return {
+    accent,
+    icon,
+    spike,
+    stickerShape,
+    stripeCount,
+    cornerStyle,
+    foil,
+    wear: 0.3,
+    showSticker: true,
+    showStripes: true,
+    showFoil: foil !== "none",
+    showWear: true
+  };
+};
 
 const styleKey = (style?: ShelfStyle | null) =>
   style
@@ -145,15 +156,14 @@ const styleKey = (style?: ShelfStyle | null) =>
 
 const pickShelfStyle = (seed: string, existing: ReadingSession[]) => {
   const used = new Set(existing.map((session) => styleKey(session.shelfStyle)));
-  const startIndex = hashSeed(seed) % shelfCombos.length;
-  for (let offset = 0; offset < shelfCombos.length; offset += 1) {
-    const index = (startIndex + offset) % shelfCombos.length;
-    const combo = shelfCombos[index];
+  const startIndex = hashSeed(seed) % SHELF_COMBO_COUNT;
+  for (let offset = 0; offset < SHELF_COMBO_COUNT; offset += 1) {
+    const combo = shelfComboAt(startIndex + offset);
     if (!used.has(styleKey(combo))) {
       return combo;
     }
   }
-  return shelfCombos[startIndex];
+  return shelfComboAt(startIndex);
 };
 
 const defaultGoal: DailyGoal = { mode: "minutes", target: 20 };
@@ -313,8 +323,7 @@ export const useHabitStore = create<HabitState>((set, get) => ({
     const dateKey = getDateKey(new Date(session.endedAt));
     const daily = { ...get().daily };
     const record = daily[dateKey] ?? { minutes: 0 };
-    record.minutes += Math.max(0, session.durationMinutes);
-    daily[dateKey] = record;
+    daily[dateKey] = { ...record, minutes: record.minutes + Math.max(0, session.durationMinutes) };
 
     const forest: ForestItem[] = [
       ...get().forest,
@@ -341,8 +350,7 @@ export const useHabitStore = create<HabitState>((set, get) => ({
   markGoalComplete(dateKey, complete) {
     const daily = { ...get().daily };
     const record = daily[dateKey] ?? { minutes: 0 };
-    record.manualComplete = complete;
-    daily[dateKey] = record;
+    daily[dateKey] = { ...record, manualComplete: complete };
     set({ daily });
     persistState({ ...get(), daily });
   },
@@ -399,8 +407,7 @@ export const useHabitStore = create<HabitState>((set, get) => ({
     const dateKey = getDateKey(new Date(full.endedAt));
     const daily = { ...get().daily };
     const record = daily[dateKey] ?? { minutes: 0 };
-    record.minutes += Math.max(0, full.durationMinutes);
-    daily[dateKey] = record;
+    daily[dateKey] = { ...record, minutes: record.minutes + Math.max(0, full.durationMinutes) };
 
     const forest: ForestItem[] = [
       ...get().forest,

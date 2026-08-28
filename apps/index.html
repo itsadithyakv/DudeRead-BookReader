@@ -11,7 +11,9 @@
           const saved = JSON.parse(localStorage.getItem("leaflet.appearance.v1") || "null");
           const theme = saved?.theme === "light" || saved?.theme === "dark"
             ? saved.theme
-            : "dark";
+            : window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
           document.documentElement.dataset.theme = theme;
           document.documentElement.style.colorScheme = theme;
         } catch {

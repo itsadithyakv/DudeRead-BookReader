@@ -12,6 +12,36 @@
     "resources": [
       "resources/**/*"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF document",
+        "description": "PDF document",
+        "mimeType": "application/pdf",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["epub"],
+        "name": "EPUB book",
+        "description": "EPUB book",
+        "mimeType": "application/epub+zip",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mobi"],
+        "name": "Mobipocket book",
+        "description": "Mobipocket book",
+        "mimeType": "application/x-mobipocket-ebook",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["azw3"],
+        "name": "Kindle book",
+        "description": "Kindle book",
+        "mimeType": "application/vnd.amazon.ebook",
+        "role": "Viewer"
+      }
+    ],
     "icon": [
       "icons/icon.ico"
     ]

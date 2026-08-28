@@ -9,6 +9,8 @@ export type Book = {
   progress: number;
   lastOpened: string | null;
   createdAt: string;
+  // Last time metadata enrichment ran for this book, successful or not.
+  metadataCheckedAt?: string | null;
 };
 
 export type BookFilter = {

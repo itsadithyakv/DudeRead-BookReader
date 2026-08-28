@@ -6,9 +6,9 @@ export type BookFormat = {
 
 export const BOOK_FORMATS: BookFormat[] = [
   { extension: "epub", label: "EPUB", readable: true },
-  { extension: "pdf", label: "PDF", readable: false },
-  { extension: "azw3", label: "AZW3", readable: false },
-  { extension: "mobi", label: "MOBI", readable: false }
+  { extension: "pdf", label: "PDF", readable: true },
+  { extension: "azw3", label: "AZW3", readable: true },
+  { extension: "mobi", label: "MOBI", readable: true }
 ];
 
 export const IMPORTABLE_EXTENSIONS = BOOK_FORMATS.map((format) => format.extension);

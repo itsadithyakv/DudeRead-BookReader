@@ -62,6 +62,12 @@ export const bookService = {
     }
     return invoke<string | null>("read_book_bytes", { bookId });
   },
+  async takePendingOpenPaths(): Promise<string[]> {
+    if (!isTauri()) {
+      return [];
+    }
+    return invoke<string[]>("take_pending_open_paths");
+  },
   async updateProgress(bookId: string, progress: number): Promise<void> {
     if (!isTauri()) {
       return;

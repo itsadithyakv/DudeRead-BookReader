@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Book } from "@shared/models/book";
 import { bookService } from "../services/bookService";
 
@@ -9,7 +9,7 @@ type Props = {
   onOpen: (book: Book) => void;
 };
 
-export const BookCard = ({ book, onRefresh, onOpen }: Props) => {
+const BookCardComponent = ({ book, onRefresh, onOpen }: Props) => {
   const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
   const triedFallback = useRef(false);
 
@@ -101,3 +101,5 @@ export const BookCard = ({ book, onRefresh, onOpen }: Props) => {
     </article>
   );
 };
+
+export const BookCard = memo(BookCardComponent);

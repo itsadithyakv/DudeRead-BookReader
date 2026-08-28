@@ -16,8 +16,14 @@ pub async fn import_books(
   let mut imported = Vec::new();
 
   for path in paths {
-    let source = std::path::Path::new(&path);
-    let hash = storage::hash_file(source).map_err(|e| e.to_string())?;
+    let source = std::path::PathBuf::from(&path);
+    let hash = {
+      let source = source.clone();
+      tauri::async_runtime::spawn_blocking(move || storage::hash_file(&source))
+        .await
+        .map_err(|e| format!("Import task failed: {e}"))?
+        .map_err(|e| e.to_string())?
+    };
     if let Some(existing) = {
       let db = state.db.lock().unwrap();
       db.find_by_hash(&hash).map_err(|e| e.to_string())?
@@ -26,8 +32,18 @@ pub async fn import_books(
       continue;
     }
 
-    let stored = storage::store_book_file(source, &hash).map_err(|e| e.to_string())?;
-    let mut basic = storage::extract_basic_metadata(&stored).map_err(|e| e.to_string())?;
+    let (stored, mut basic) = {
+      let source = source.clone();
+      let hash = hash.clone();
+      tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
+        let stored = storage::store_book_file(&source, &hash)?;
+        let basic = storage::extract_basic_metadata(&stored)?;
+        Ok((stored, basic))
+      })
+      .await
+      .map_err(|e| format!("Import task failed: {e}"))?
+      .map_err(|e| e.to_string())?
+    };
 
     let filename = source
       .file_stem()
@@ -58,7 +74,8 @@ pub async fn import_books(
       file_hash: hash,
       progress: 0.0,
       last_opened: None,
-      created_at: db::now_iso()
+      created_at: db::now_iso(),
+      metadata_checked_at: None
     };
 
     {
@@ -76,6 +93,11 @@ pub async fn import_books(
 pub fn list_books(state: State<'_, AppState>) -> Result<Vec<BookRecord>, String> {
   let db = state.db.lock().unwrap();
   db.list_books().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn take_pending_open_paths(state: State<'_, AppState>) -> Vec<String> {
+  std::mem::take(&mut *state.pending_open_paths.lock().unwrap())
 }
 
 #[tauri::command]
@@ -117,6 +139,8 @@ pub async fn refresh_metadata(book_id: String, state: State<'_, AppState>) -> Re
       }
     }
   }
+
+  book.metadata_checked_at = Some(db::now_iso());
 
   {
     let db = state.db.lock().unwrap();
@@ -186,8 +210,11 @@ pub fn cover_data(book_id: String, state: State<'_, AppState>) -> Result<Option<
   };
 
   let bytes = std::fs::read(&cover_url).map_err(|e| e.to_string())?;
+  // Covers are saved under a .jpg name whatever they actually are, so the media
+  // type has to come from the bytes or PNG/WebP covers fail to decode.
+  let mime = storage::sniff_image_mime(&bytes).unwrap_or("image/jpeg");
   let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-  Ok(Some(format!("data:image/jpeg;base64,{}", encoded)))
+  Ok(Some(format!("data:{};base64,{}", mime, encoded)))
 }
 
 #[tauri::command]
@@ -210,8 +237,8 @@ pub async fn read_book_bytes(
     .unwrap_or("")
     .to_lowercase();
 
-  if ext != "epub" && ext != "mobi" && ext != "azw3" {
-    return Err("This reader supports EPUB files only.".to_string());
+  if ext != "epub" && ext != "pdf" && ext != "mobi" && ext != "azw3" {
+    return Err("This reader supports PDF, EPUB, MOBI and AZW3 files.".to_string());
   }
 
   if (ext == "mobi" || ext == "azw3") && !storage::converter_installed(&app) {
@@ -224,7 +251,7 @@ pub async fn read_book_bytes(
   let file_hash = book.file_hash.clone();
   let app_handle = app.clone();
   tauri::async_runtime::spawn_blocking(move || {
-    let readable_path = if ext == "epub" {
+    let readable_path = if ext == "epub" || ext == "pdf" {
       source_path
     } else {
       storage::ensure_epub_version(&source_path, &file_hash, Some(&app_handle))

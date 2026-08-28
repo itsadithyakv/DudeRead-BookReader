@@ -1,5 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "./components/Sidebar";
 import { AccountBadge } from "./components/AccountBadge";
@@ -19,11 +21,16 @@ import { converterService } from "./services/converterService";
 import { getPlatform } from "./platform";
 import Logo from "./assets/logoLeaflet500x500.png";
 import type { Book } from "@shared/models/book";
+import { getBookExtension, isImportableExtension } from "./constants/bookFormats";
 
 type Tab = "library" | "collections" | "analytics" | "settings";
 
 const ReaderView = lazy(() =>
   import("./pages/ReaderView").then((module) => ({ default: module.ReaderView }))
+);
+
+const PdfReaderView = lazy(() =>
+  import("./pages/PdfReaderView").then((module) => ({ default: module.PdfReaderView }))
 );
 
 const tabLabels: Record<Tab, string> = {
@@ -45,11 +52,30 @@ const App = () => {
     loadBooks,
     loadStats,
     loadDriveStatus,
+    importPaths,
     openBook,
     startDriveAuth,
     syncNow,
     setFilter
-  } = useLibraryStore();
+  } = useLibraryStore(
+    useShallow((state) => ({
+      books: state.books,
+      filters: state.filters,
+      syncStatus: state.syncStatus,
+      driveConnected: state.driveConnected,
+      metadataRefreshing: state.metadataRefreshing,
+      metadataTotal: state.metadataTotal,
+      metadataDone: state.metadataDone,
+      loadBooks: state.loadBooks,
+      loadStats: state.loadStats,
+      loadDriveStatus: state.loadDriveStatus,
+      importPaths: state.importPaths,
+      openBook: state.openBook,
+      startDriveAuth: state.startDriveAuth,
+      syncNow: state.syncNow,
+      setFilter: state.setFilter
+    }))
+  );
 
   const [activeTab, setActiveTab] = useState<Tab>("library");
   const [selected, setSelected] = useState<Book | null>(null);
@@ -75,10 +101,35 @@ const App = () => {
     setLastSyncedAt,
     setSyncState,
     tier
-  } = useAccountStore();
+  } = useAccountStore(
+    useShallow((state) => ({
+      loggedIn: state.loggedIn,
+      email: state.email,
+      premium: state.premium,
+      lastSyncedAt: state.lastSyncedAt,
+      syncState: state.syncState,
+      load: state.load,
+      signIn: state.signIn,
+      signOut: state.signOut,
+      upgradePremium: state.upgradePremium,
+      restorePremium: state.restorePremium,
+      setLastSyncedAt: state.setLastSyncedAt,
+      setSyncState: state.setSyncState,
+      tier: state.tier
+    }))
+  );
 
   const { activeSession, focusSettings, goal, startSession, stopSession, clearSessionShelf } =
-    useHabitStore();
+    useHabitStore(
+      useShallow((state) => ({
+        activeSession: state.activeSession,
+        focusSettings: state.focusSettings,
+        goal: state.goal,
+        startSession: state.startSession,
+        stopSession: state.stopSession,
+        clearSessionShelf: state.clearSessionShelf
+      }))
+    );
   const fullscreenLockRef = useRef(false);
   const theme = useAppearanceStore((state) => state.theme);
   const toggleTheme = useAppearanceStore((state) => state.toggleTheme);
@@ -175,6 +226,84 @@ const App = () => {
         setConverterPromptBook(book);
       });
   };
+
+  const handleOpenBookRef = useRef(handleOpenBook);
+  handleOpenBookRef.current = handleOpenBook;
+  // Stable identity so BookCard/BookRow memoisation is not defeated every render.
+  const openBookFromLibrary = useCallback((target: Book) => {
+    handleOpenBookRef.current(target);
+  }, []);
+
+  const openAssociatedPaths = useCallback(
+    async (paths: string[]) => {
+      const supportedPaths = Array.from(
+        new Set(paths.filter((path) => isImportableExtension(getBookExtension(path))))
+      );
+      if (supportedPaths.length === 0) {
+        return;
+      }
+
+      try {
+        const imported = await importPaths(supportedPaths);
+        if (imported.length === 0) {
+          return;
+        }
+        setActiveTab("library");
+        handleOpenBookRef.current(imported[0]);
+        if (imported.length > 1) {
+          showToast(
+            `Opened ${imported[0].title}; ${imported.length - 1} more ${
+              imported.length === 2 ? "book was" : "books were"
+            } added to your library.`
+          );
+        }
+      } catch (error) {
+        showToast(resolveErrorMessage(error, "Leaflet could not open that book."));
+      }
+    },
+    [importPaths, showToast]
+  );
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const drainPendingPaths = () => {
+      void bookService
+        .takePendingOpenPaths()
+        .then((paths) => {
+          if (!disposed) {
+            void openAssociatedPaths(paths);
+          }
+        })
+        .catch((error) => {
+          if (!disposed) {
+            showToast(resolveErrorMessage(error, "Leaflet could not receive the opened book."));
+          }
+        });
+    };
+
+    void listen("open-book-files", drainPendingPaths).then((stopListening) => {
+      if (disposed) {
+        stopListening();
+        return;
+      }
+      unlisten = stopListening;
+      drainPendingPaths();
+    }).catch((error) => {
+      if (!disposed) {
+        showToast(resolveErrorMessage(error, "Leaflet could not watch for opened books."));
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openAssociatedPaths, showToast]);
 
   const handleConverterDownload = () => {
     if (!converterPromptBook || converterBusy) {
@@ -507,7 +636,11 @@ const App = () => {
         </div>
         <main className="min-w-0 flex-1 overflow-y-auto bg-transparent px-4 py-8 pb-28 md:px-8">
           {activeTab === "library" && (
-            <LibraryPage onOpenBook={handleOpenBook} onNavigate={setActiveTab} showToast={showToast} />
+            <LibraryPage
+              onOpenBook={openBookFromLibrary}
+              onNavigate={setActiveTab}
+              showToast={showToast}
+            />
           )}
           {activeTab === "collections" && (
             <CollectionsPage onNavigate={setActiveTab} showToast={showToast} />
@@ -656,7 +789,11 @@ const App = () => {
             </div>
           }
         >
-          <ReaderView book={selected} onClose={() => setSelected(null)} />
+          {getBookExtension(selected.localPath) === "pdf" ? (
+            <PdfReaderView key={selected.id} book={selected} onClose={() => setSelected(null)} />
+          ) : (
+            <ReaderView key={selected.id} book={selected} onClose={() => setSelected(null)} />
+          )}
         </Suspense>
       )}
 
